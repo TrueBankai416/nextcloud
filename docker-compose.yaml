@@ -1,0 +1,119 @@
+name: nextcloud
+
+services:
+  mariadb:
+    image: mariadb:10.11
+    container_name: mariadb
+    restart: always
+    command: --transaction-isolation=READ-COMMITTED --log-bin=binlog --binlog-format=ROW --log_bin_trust_function_creators=true
+    volumes:
+      - ${DB_DATA_LOCATION}:/var/lib/mysql
+    env_file:
+      - .env
+    networks:
+      - nextcloud
+
+  nextcloud:
+    image: bankaitech/nextcloud:latest
+    container_name: nextcloud
+    restart: always
+    ports:
+      - ${PORT}:80
+    links:
+      - mariadb
+      - redis
+      - collabora
+#      - onlyoffice
+      - go-vod
+    volumes:
+      - ${DATA_LOCATION}:/var/www/html
+      - ./dev/custom_apps/kicad-viewer:/var/www/html/apps/kicad_viewer
+    env_file:
+      - .env
+    networks:
+      - nextcloud
+#    runtime: nvidia
+#    deploy:
+#      resources:
+#        reservations:
+#          devices:
+#            - driver: nvidia
+#              count: all
+#              capabilities: [gpu]
+
+  cron:
+    image: bankaitech/nextcloud:latest
+    container_name: cron
+    restart: always
+    networks:
+      - nextcloud
+    volumes:
+      - ${DATA_LOCATION}:/var/www/html:z
+    depends_on:
+      - mariadb
+      - redis
+    entrypoint: /cron.sh
+
+  redis:
+    container_name: redis
+    image: redis:latest
+    volumes:
+      - type: tmpfs
+        target: /data
+        tmpfs:
+          size: 1073741824 # 1GB
+    expose:
+      - 6379
+    command: redis-server --save 60 1 --loglevel warning
+    networks:
+      - nextcloud
+    restart: always
+
+  collabora:
+    container_name: collabora
+    hostname: collabora
+    privileged: true
+    tty: true
+    ports:
+      - 9980:9980
+    cap_add:
+      - MKNOD
+    image: collabora/code:latest
+    volumes:
+#      - ./collabora/config/coolwsd.xml:/etc/coolwsd/coolwsd.xml
+      - ./collabora/fonts:/usr/share/fonts/truetype/more/
+      - ./collabora/fonts:/opt/cool/systemplate/usr/share/fonts/truetype/more/
+    env_file:
+      - .env
+    networks:
+      - nextcloud
+    restart: always
+
+  go-vod:
+    image: radialapps/go-vod
+    restart: always
+    container_name: go-vod
+    env_file:
+      - .env
+    volumes:
+      - ${DATA_LOCATION}:/var/www/html:ro
+#    runtime: nvidia # (NVENC)
+    networks:
+      - nextcloud
+
+#  documentserver:
+#    container_name: onlyoffice
+#    stdin_open: true
+#    tty: true
+#    ports:
+#      - 87:80
+#    volumes:
+#      - ./DocumentServer/logs:/var/log/onlyoffice
+#      - ./DocumentServer/data:/var/www/onlyoffice/Data
+#    image: onlyoffice/documentserver
+#    networks:
+#      - nextcloud
+
+networks:
+  nextcloud:
+    driver: bridge
