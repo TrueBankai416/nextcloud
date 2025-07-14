@@ -42,7 +42,7 @@ services:
     networks:
       - nextcloud
     healthcheck:
-      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p$$MYSQL_ROOT_PASSWORD"]
       interval: 30s
       timeout: 10s
       retries: 3
