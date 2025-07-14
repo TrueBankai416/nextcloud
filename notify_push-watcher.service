@@ -1,0 +1,14 @@
+[Unit]
+Description=Restart Push daemon for Nextcloud clients when it receives updates
+Documentation=https://github.com/nextcloud/notify_push
+Requires=notify_push.service
+After=notify_push.service
+StartLimitIntervalSec=10
+StartLimitBurst=5
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl restart notify_push.service
+
+[Install]
+WantedBy=multi-user.target
