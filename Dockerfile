@@ -50,9 +50,16 @@ RUN docker-php-ext-install pdlib
 # Install the bz2 PHP extension
 RUN docker-php-ext-install bz2
 
-# Add cron jobs for Nextcloud's background tasks
-RUN echo '12 * * * * php /var/www/html/occ face:background_job' >> /var/spool/cron/crontabs/www-data
-RUN echo '37 * * * * php /var/www/html/occ preview:pre-generate' >> /var/spool/cron/crontabs/www-data
+# Copy conditional cron script
+COPY conditional-cron.sh /usr/local/bin/conditional-cron.sh
+RUN chmod +x /usr/local/bin/conditional-cron.sh
+
+# Add conditional cron jobs for Nextcloud's background tasks
+RUN echo '*/5 * * * * /usr/local/bin/conditional-cron.sh general' >> /var/spool/cron/crontabs/www-data
+RUN echo '12 * * * * /usr/local/bin/conditional-cron.sh face' >> /var/spool/cron/crontabs/www-data  
+RUN echo '37 * * * * /usr/local/bin/conditional-cron.sh preview' >> /var/spool/cron/crontabs/www-data
+RUN echo '15 2 * * * /usr/local/bin/conditional-cron.sh memories' >> /var/spool/cron/crontabs/www-data
+RUN echo '45 3 * * * /usr/local/bin/conditional-cron.sh recognize' >> /var/spool/cron/crontabs/www-data
 
 # Enable the repository for pdlib and install dlib
 RUN mkdir -m 0755 -p /etc/apt/keyrings/ \
