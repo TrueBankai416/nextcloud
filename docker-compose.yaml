@@ -69,7 +69,6 @@ services:
       - "${NOTIFY_PUSH_PORT:-7867}:7867"  # notify_push WebSocket port
     volumes:
       - ${DATA_LOCATION:-nextcloud_data}:/var/www/html
-      - ./dev/custom_apps/kicad-viewer:/var/www/html/apps/kicad_viewer
       - /etc/localtime:/etc/localtime:ro
     environment:
       # Enhanced environment variables for better performance
