@@ -11,7 +11,6 @@ RUN apt-get update \
     cmake \
     ffmpeg \
     ghostscript \
-    ghostwriter \
     git \
     imagemagick \
     inotify-tools \
@@ -22,7 +21,12 @@ RUN apt-get update \
     sudo \
     nano \
     libmagickcore-6.q16-6-extra \
-#    systemd \
+    exiftool \
+    supervisor \
+    curl \
+    wget \
+    gnupg2 \
+    unzip \
  && apt-get clean
 
 RUN pecl install inotify && \
@@ -49,10 +53,6 @@ RUN docker-php-ext-install bz2
 # Add cron jobs for Nextcloud's background tasks
 RUN echo '12 * * * * php /var/www/html/occ face:background_job' >> /var/spool/cron/crontabs/www-data
 RUN echo '37 * * * * php /var/www/html/occ preview:pre-generate' >> /var/spool/cron/crontabs/www-data
-
-# Install additional utilities
-RUN apt update \
-  && apt install -y wget gnupg2 unzip
 
 # Enable the repository for pdlib and install dlib
 RUN mkdir -m 0755 -p /etc/apt/keyrings/ \
@@ -118,21 +118,37 @@ RUN set -ex; \
     apt-get purge -y --auto-remove -o APT::AutoRemove::RecommendsImportant=false; \
     rm -rf /var/lib/apt/lists/*
 
-# Copy and adjust permissions for cron
-COPY cron.sh /
-RUN chmod +x /cron.sh
+# Install notify_push binary
+RUN NOTIFY_PUSH_VERSION=$(curl -s https://api.github.com/repos/nextcloud/notify_push/releases/latest | grep -oP '"tag_name": "\K(.*)(?=")') \
+ && wget -O /tmp/notify_push.tar.gz "https://github.com/nextcloud/notify_push/releases/download/${NOTIFY_PUSH_VERSION}/notify_push-x86_64-unknown-linux-musl.tar.gz" \
+ && tar -xzf /tmp/notify_push.tar.gz -C /tmp/ \
+ && mv /tmp/notify_push /usr/local/bin/notify_push \
+ && chmod +x /usr/local/bin/notify_push \
+ && rm /tmp/notify_push.tar.gz
 
-# Copy notify_push services
-#COPY notify_push.service /etc/systemd/system/
-#COPY notify_push-watcher.service /etc/systemd/system/
-#RUN chmod +x /etc/systemd/system/notify_push.service /etc/systemd/system/notify_push-watcher.service
+# Copy supervisord configuration
+COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
+
+# Copy and adjust permissions for cron and setup scripts
+COPY cron.sh /
+COPY setup-notify-push.sh /
+COPY docker-entrypoint.sh /
+COPY init-notify-push.sh /
+RUN chmod +x /cron.sh /setup-notify-push.sh /docker-entrypoint.sh /init-notify-push.sh
+
+# Create directory for supervisor logs
+RUN mkdir -p /var/log/supervisor
 
 # Set an environment variable to indicate that Nextcloud should be updated
 ENV NEXTCLOUD_UPDATE=1
 
-# Set the command to run supervisord on container start
+# Expose notify_push port
+EXPOSE 7867
+
 # Health check to ensure Nextcloud is running and accessible
-# The health check pings the Nextcloud status.php page and expects an HTTP 200 response
-# Adjust the interval, timeout, start period, and retries as necessary for your environment
 HEALTHCHECK --interval=1m --timeout=10s --start-period=30s --retries=3 \
   CMD curl -f http://localhost/status.php || exit 1
+
+# Use custom entrypoint that sets up notify_push
+ENTRYPOINT ["/docker-entrypoint.sh"]
+CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
