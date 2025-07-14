@@ -37,48 +37,44 @@ docker run -d \
   your-registry/nextcloud:latest
 ```
 
-### Docker Compose
-```yaml
-version: '3.8'
-services:
-  nextcloud:
-    image: your-registry/nextcloud:latest
-    ports:
-      - "8080:80"
-      - "7867:7867"  # notify_push port
-    volumes:
-      - nextcloud_data:/var/www/html
-    environment:
-      - NEXTCLOUD_ADMIN_USER=admin
-      - NEXTCLOUD_ADMIN_PASSWORD=secure_password
-      - MYSQL_HOST=db
-      - MYSQL_DATABASE=nextcloud
-      - MYSQL_USER=nextcloud
-      - MYSQL_PASSWORD=secure_db_password
-    depends_on:
-      - db
-      - redis
+### Docker Compose (Recommended)
 
-  db:
-    image: mariadb:10.6
-    environment:
-      - MYSQL_ROOT_PASSWORD=root_password
-      - MYSQL_DATABASE=nextcloud
-      - MYSQL_USER=nextcloud
-      - MYSQL_PASSWORD=secure_db_password
-    volumes:
-      - db_data:/var/lib/mysql
+A comprehensive `docker-compose.yaml` file is included with the following services:
 
-  redis:
-    image: redis:7-alpine
-    volumes:
-      - redis_data:/data
+#### Basic Setup
+```bash
+# Copy environment file and customize
+cp .env.example .env
+# Edit .env file with your passwords and configuration
 
-volumes:
-  nextcloud_data:
-  db_data:
-  redis_data:
+# Start with basic services
+docker-compose up -d
 ```
+
+#### With Nginx Reverse Proxy
+```bash
+# Start with Nginx for HTTPS and WebSocket handling
+docker-compose --profile with-nginx up -d
+```
+
+#### With Collabora Online
+```bash
+# Start with document editing support
+docker-compose --profile with-collabora up -d
+```
+
+#### Full Setup with All Services
+```bash
+# Start with all optional services
+docker-compose --profile with-nginx --profile with-collabora up -d
+```
+
+**Services included:**
+- **nextcloud**: Enhanced Nextcloud with notify_push
+- **db**: MariaDB database with optimized configuration
+- **redis**: Redis for caching and session storage
+- **nginx**: (Optional) Reverse proxy with SSL and WebSocket support
+- **collabora**: (Optional) Document editing server
 
 ## notify_push Configuration
 
@@ -88,10 +84,27 @@ The notify_push service is automatically configured and runs on port 7867. To us
 2. **Configure your reverse proxy** to handle WebSocket connections on `/push`
 3. **Test the connection**:
    ```bash
-   php occ notify_push:self-test
+   docker exec -u www-data nextcloud php occ notify_push:self-test
    ```
 
-### Nginx Configuration Example
+### Using the Included Nginx Configuration
+
+The included `docker-compose.yaml` provides a pre-configured Nginx reverse proxy:
+
+```bash
+# Start with Nginx reverse proxy
+docker-compose --profile with-nginx up -d
+```
+
+The `nginx.conf` file includes:
+- Proper WebSocket handling for notify_push
+- Rate limiting for login attempts
+- SSL/HTTPS support (configuration included)
+- Optimized static file caching
+- Large file upload support
+
+### Manual Nginx Configuration
+If using your own Nginx setup:
 ```nginx
 location /push/ {
     proxy_pass http://127.0.0.1:7867/;
@@ -128,11 +141,50 @@ The image includes several performance optimizations:
 - **APCu**: Enabled for CLI operations
 - **Background jobs**: Configured for face recognition and preview generation
 
+## Quick Start
+
+### 1. Clone and Configure
+```bash
+git clone <repository-url>
+cd nextcloud
+cp .env.example .env
+# Edit .env with your secure passwords
+```
+
+### 2. Start Services
+```bash
+# Basic setup
+docker-compose up -d
+
+# Or with Nginx reverse proxy
+docker-compose --profile with-nginx up -d
+
+# Or with all services
+docker-compose --profile with-nginx --profile with-collabora up -d
+```
+
+### 3. Access Nextcloud
+- **HTTP**: http://localhost:8080
+- **HTTPS** (with nginx): https://localhost
+- **notify_push**: WebSocket on port 7867
+
+### 4. Verify notify_push
+```bash
+docker exec -u www-data nextcloud php occ notify_push:self-test
+```
+
 ## Building the Image
 
 ```bash
 docker build -t your-registry/nextcloud:latest .
 ```
+
+## Configuration Files
+
+- **docker-compose.yaml**: Complete multi-service setup
+- **nginx.conf**: Reverse proxy configuration with WebSocket support
+- **.env.example**: Environment variables template
+- **README.md**: This documentation
 
 ## Troubleshooting
 
