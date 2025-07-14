@@ -1,85 +1,15 @@
-version: '3.8'
+name: nextcloud
 
 services:
-  nextcloud:
-    build: .
-    # Or use: image: your-registry/nextcloud:latest
-    container_name: nextcloud
-    restart: unless-stopped
-    ports:
-      - "${HTTP_PORT:-8080}:80"
-      - "${NOTIFY_PUSH_PORT:-7867}:7867"  # notify_push WebSocket port
-    volumes:
-      - nextcloud_data:/var/www/html
-      - ./custom_apps:/var/www/html/custom_apps
-      - ./config:/var/www/html/config
-      - ./data:/var/www/html/data
-      - ./themes:/var/www/html/themes
-      - /etc/localtime:/etc/localtime:ro
-    environment:
-      - NEXTCLOUD_ADMIN_USER=${NEXTCLOUD_ADMIN_USER:-admin}
-      - NEXTCLOUD_ADMIN_PASSWORD=${NEXTCLOUD_ADMIN_PASSWORD:-change_me_secure_password}
-      - NEXTCLOUD_TRUSTED_DOMAINS=${NEXTCLOUD_TRUSTED_DOMAINS:-localhost nextcloud.local}
-      - NEXTCLOUD_UPDATE=1
-      - NEXTCLOUD_DATA_DIR=/var/www/html/data
-      - NEXTCLOUD_INIT_HTACCESS=1
-      - APACHE_DISABLE_REWRITE_IP=1
-      
-      # Database configuration
-      - MYSQL_HOST=db
-      - MYSQL_DATABASE=${MYSQL_DATABASE:-nextcloud}
-      - MYSQL_USER=${MYSQL_USER:-nextcloud}
-      - MYSQL_PASSWORD=${MYSQL_PASSWORD:-change_me_db_password}
-      
-      # Redis configuration
-      - REDIS_HOST=redis
-      - REDIS_HOST_PORT=6379
-      
-      # notify_push configuration
-      - PORT=${NOTIFY_PUSH_PORT:-7867}
-      
-      # Performance tuning
-      - PHP_MEMORY_LIMIT=${PHP_MEMORY_LIMIT:-1024M}
-      - PHP_UPLOAD_LIMIT=${PHP_UPLOAD_LIMIT:-2048M}
-      - PHP_MAX_EXECUTION_TIME=3600
-      - PHP_MAX_INPUT_TIME=3600
-      
-      # Security
-      - APACHE_DOCUMENT_ROOT=/var/www/html
-      - APACHE_LOG_DIR=/var/log/apache2
-      
-    depends_on:
-      db:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    networks:
-      - nextcloud-network
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost/status.php"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s
-    deploy:
-      resources:
-        limits:
-          memory: 2G
-        reservations:
-          memory: 1G
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-
-  db:
+  mariadb:
     image: mariadb:10.11
-    container_name: nextcloud_db
+    container_name: mariadb
     restart: unless-stopped
     command: >
       --transaction-isolation=READ-COMMITTED
+      --log-bin=binlog
       --binlog-format=ROW
+      --log_bin_trust_function_creators=true
       --innodb-file-per-table=1
       --skip-innodb-read-only-compressed
       --innodb-buffer-pool-size=1G
@@ -101,18 +31,16 @@ services:
       --slow-query-log-file=/var/log/mysql/slow.log
       --long-query-time=2
     volumes:
-      - db_data:/var/lib/mysql
+      - ${DB_DATA_LOCATION:-db_data}:/var/lib/mysql
       - db_logs:/var/log/mysql
       - /etc/localtime:/etc/localtime:ro
     environment:
-      - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD:-change_me_root_password}
-      - MYSQL_DATABASE=${MYSQL_DATABASE:-nextcloud}
-      - MYSQL_USER=${MYSQL_USER:-nextcloud}
-      - MYSQL_PASSWORD=${MYSQL_PASSWORD:-change_me_db_password}
       - MYSQL_CHARSET=utf8mb4
       - MYSQL_COLLATION=utf8mb4_unicode_ci
+    env_file:
+      - .env
     networks:
-      - nextcloud-network
+      - nextcloud
     healthcheck:
       test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
       interval: 30s
@@ -131,34 +59,80 @@ services:
         max-size: "10m"
         max-file: "3"
 
-  redis:
-    image: redis:7-alpine
-    container_name: nextcloud_redis
+  nextcloud:
+    build: .
+    # Enhanced image with notify_push, memories, and recognize support
+    container_name: nextcloud
     restart: unless-stopped
-    command: >
-      redis-server
-      --appendonly yes
-      --appendfsync everysec
-      --maxmemory 512mb
-      --maxmemory-policy allkeys-lru
-      --save 900 1
-      --save 300 10
-      --save 60 10000
-      --tcp-keepalive 300
-      --timeout 300
+    ports:
+      - "${PORT:-8080}:80"
+      - "${NOTIFY_PUSH_PORT:-7867}:7867"  # notify_push WebSocket port
     volumes:
-      - redis_data:/data
+      - ${DATA_LOCATION:-nextcloud_data}:/var/www/html
+      - ./dev/custom_apps/kicad-viewer:/var/www/html/apps/kicad_viewer
       - /etc/localtime:/etc/localtime:ro
     environment:
-      - REDIS_REPLICATION_MODE=master
+      # Enhanced environment variables for better performance
+      - PHP_MEMORY_LIMIT=${PHP_MEMORY_LIMIT:-1024M}
+      - PHP_UPLOAD_LIMIT=${PHP_UPLOAD_LIMIT:-2048M}
+      - PHP_MAX_EXECUTION_TIME=3600
+      - PHP_MAX_INPUT_TIME=3600
+      - NEXTCLOUD_INIT_HTACCESS=1
+      - APACHE_DISABLE_REWRITE_IP=1
+      - APACHE_DOCUMENT_ROOT=/var/www/html
+      - APACHE_LOG_DIR=/var/log/apache2
+    env_file:
+      - .env
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     networks:
-      - nextcloud-network
+      - nextcloud
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "curl", "-f", "http://localhost/status.php"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 30s
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 1G
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+#    runtime: nvidia
+#    deploy:
+#      resources:
+#        reservations:
+#          devices:
+#            - driver: nvidia
+#              count: all
+#              capabilities: [gpu]
+
+  cron:
+    build: .
+    container_name: cron
+    restart: unless-stopped
+    networks:
+      - nextcloud
+    volumes:
+      - ${DATA_LOCATION:-nextcloud_data}:/var/www/html:z
+      - /etc/localtime:/etc/localtime:ro
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    entrypoint: /cron.sh
+    env_file:
+      - .env
     deploy:
       resources:
         limits:
@@ -171,32 +145,34 @@ services:
         max-size: "10m"
         max-file: "3"
 
-  # Optional: Nginx reverse proxy for HTTPS and notify_push WebSocket handling
-  nginx:
-    image: nginx:alpine
-    container_name: nextcloud_nginx
+  redis:
+    container_name: redis
+    image: redis:7-alpine
     restart: unless-stopped
-    ports:
-      - "${HTTPS_PORT:-443}:443"
-      - "${HTTP_PORT_NGINX:-80}:80"
+    command: >
+      redis-server
+      --save 60 1
+      --loglevel warning
+      --appendonly yes
+      --appendfsync everysec
+      --maxmemory 1gb
+      --maxmemory-policy allkeys-lru
+      --tcp-keepalive 300
+      --timeout 300
     volumes:
-      - ./nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./ssl:/etc/nginx/ssl:ro
-      - nextcloud_data:/var/www/html:ro
-      - nginx_logs:/var/log/nginx
+      - type: tmpfs
+        target: /data
+        tmpfs:
+          size: 1073741824 # 1GB
       - /etc/localtime:/etc/localtime:ro
-    environment:
-      - NGINX_HOST=${NGINX_HOST:-localhost}
-      - NGINX_PORT=80
-    depends_on:
-      nextcloud:
-        condition: service_healthy
+    expose:
+      - 6379
     networks:
-      - nextcloud-network
-    profiles:
-      - with-nginx
+      - nextcloud
+    environment:
+      - REDIS_REPLICATION_MODE=master
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost/nginx_status"]
+      test: ["CMD", "redis-cli", "ping"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -204,35 +180,39 @@ services:
     deploy:
       resources:
         limits:
-          memory: 256M
+          memory: 1G
         reservations:
-          memory: 128M
+          memory: 512M
     logging:
       driver: json-file
       options:
         max-size: "10m"
         max-file: "3"
 
-  # Optional: Collabora Online for document editing
   collabora:
+    container_name: collabora
+    hostname: collabora
     image: collabora/code:latest
-    container_name: nextcloud_collabora
     restart: unless-stopped
+    privileged: true
+    tty: true
     ports:
       - "${COLLABORA_PORT:-9980}:9980"
+    cap_add:
+      - MKNOD
+    volumes:
+#      - ./collabora/config/coolwsd.xml:/etc/coolwsd/coolwsd.xml
+      - ./collabora/fonts:/usr/share/fonts/truetype/more/
+      - ./collabora/fonts:/opt/cool/systemplate/usr/share/fonts/truetype/more/
+      - /etc/localtime:/etc/localtime:ro
     environment:
-      - domain=${COLLABORA_DOMAIN:-nextcloud\\.local}
-      - username=${COLLABORA_USERNAME:-admin}
-      - password=${COLLABORA_PASSWORD:-change_me_collabora_password}
       - DONT_GEN_SSL_CERT=1
       - extra_params=--o:ssl.enable=false --o:ssl.termination=true
       - dictionaries=en_US
-    cap_add:
-      - MKNOD
+    env_file:
+      - .env
     networks:
-      - nextcloud-network
-    profiles:
-      - with-collabora
+      - nextcloud
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9980/"]
       interval: 30s
@@ -250,11 +230,41 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+    profiles:
+      - with-collabora
+
+  go-vod:
+    image: radialapps/go-vod
+    restart: unless-stopped
+    container_name: go-vod
+    env_file:
+      - .env
+    volumes:
+      - ${DATA_LOCATION:-nextcloud_data}:/var/www/html:ro
+      - /etc/localtime:/etc/localtime:ro
+#    runtime: nvidia # (NVENC)
+    networks:
+      - nextcloud
+    depends_on:
+      - nextcloud
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 512M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    profiles:
+      - with-govod
 
   # Optional: OnlyOffice Document Server (alternative to Collabora)
   onlyoffice:
     image: onlyoffice/documentserver:latest
-    container_name: nextcloud_onlyoffice
+    container_name: onlyoffice
     restart: unless-stopped
     ports:
       - "${ONLYOFFICE_PORT:-8000}:80"
@@ -267,7 +277,7 @@ services:
       - JWT_SECRET=${ONLYOFFICE_JWT_SECRET:-change_me_jwt_secret}
       - WOPI_ENABLED=true
     networks:
-      - nextcloud-network
+      - nextcloud
     profiles:
       - with-onlyoffice
     healthcheck:
@@ -288,25 +298,66 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  # Optional: Nginx reverse proxy for HTTPS and notify_push WebSocket handling
+  nginx:
+    image: nginx:alpine
+    container_name: nextcloud_nginx
+    restart: unless-stopped
+    ports:
+      - "${HTTPS_PORT:-443}:443"
+      - "${HTTP_PORT_NGINX:-80}:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
+      - ${DATA_LOCATION:-nextcloud_data}:/var/www/html:ro
+      - nginx_logs:/var/log/nginx
+      - /etc/localtime:/etc/localtime:ro
+    environment:
+      - NGINX_HOST=${NGINX_HOST:-localhost}
+      - NGINX_PORT=80
+    depends_on:
+      nextcloud:
+        condition: service_healthy
+    networks:
+      - nextcloud
+    profiles:
+      - with-nginx
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/nginx_status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+        reservations:
+          memory: 128M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   # Optional: Backup service
   backup:
     image: offen/docker-volume-backup:latest
     container_name: nextcloud_backup
     restart: unless-stopped
     volumes:
-      - nextcloud_data:/backup/nextcloud_data:ro
-      - db_data:/backup/db_data:ro
-      - redis_data:/backup/redis_data:ro
+      - ${DATA_LOCATION:-nextcloud_data}:/backup/nextcloud_data:ro
+      - ${DB_DATA_LOCATION:-db_data}:/backup/db_data:ro
       - ./backups:/archive
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - /etc/localtime:/etc/localtime:ro
     environment:
       - BACKUP_FILENAME=nextcloud-backup-%Y%m%d-%H%M%S.tar.gz
-      - BACKUP_CRON_EXPRESSION=0 2 * * *
-      - BACKUP_RETENTION_DAYS=7
+      - BACKUP_CRON_EXPRESSION=${BACKUP_CRON_EXPRESSION:-0 2 * * *}
+      - BACKUP_RETENTION_DAYS=${BACKUP_RETENTION_DAYS:-7}
       - BACKUP_STOP_DURING_BACKUP_LABEL=nextcloud.backup.stop-during-backup
     networks:
-      - nextcloud-network
+      - nextcloud
     profiles:
       - with-backup
     logging:
@@ -316,13 +367,11 @@ services:
         max-file: "3"
 
 volumes:
-  nextcloud_data:
-    driver: local
   db_data:
     driver: local
   db_logs:
     driver: local
-  redis_data:
+  nextcloud_data:
     driver: local
   nginx_logs:
     driver: local
@@ -332,12 +381,12 @@ volumes:
     driver: local
 
 networks:
-  nextcloud-network:
+  nextcloud:
     driver: bridge
     ipam:
       driver: default
       config:
-        - subnet: 172.20.0.0/16
+        - subnet: ${DOCKER_NETWORK_SUBNET:-172.20.0.0/16}
     driver_opts:
       com.docker.network.bridge.name: nextcloud-br
       com.docker.network.driver.mtu: 1500
