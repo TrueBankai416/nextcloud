@@ -120,11 +120,8 @@ RUN set -ex; \
 
 # Install notify_push binary
 RUN NOTIFY_PUSH_VERSION=$(curl -s https://api.github.com/repos/nextcloud/notify_push/releases/latest | grep -oP '"tag_name": "\K(.*)(?=")') \
- && wget -O /tmp/notify_push.tar.gz "https://github.com/nextcloud/notify_push/releases/download/${NOTIFY_PUSH_VERSION}/notify_push-x86_64-unknown-linux-musl.tar.gz" \
- && tar -xzf /tmp/notify_push.tar.gz -C /tmp/ \
- && mv /tmp/notify_push /usr/local/bin/notify_push \
- && chmod +x /usr/local/bin/notify_push \
- && rm /tmp/notify_push.tar.gz
+ && wget -O /usr/local/bin/notify_push "https://github.com/nextcloud/notify_push/releases/download/${NOTIFY_PUSH_VERSION}/notify_push-x86_64-unknown-linux-musl" \
+ && chmod +x /usr/local/bin/notify_push
 
 # Copy supervisord configuration
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
