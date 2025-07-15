@@ -61,9 +61,9 @@ echo -e "${GREEN}✅ Nextcloud is ready${NC}"
 if [ "${INSTALL_NOTIFY_PUSH:-false}" = "true" ]; then
     if install_app "notify_push" "Notify Push"; then
         configure_app "notify_push" "
-            php occ config:app:set notify_push base_endpoint --value='ws://localhost:${NOTIFY_PUSH_PORT:-7867}'
+            php occ config:app:set notify_push base_endpoint --value='wss://${NEXTCLOUD_DOMAIN:-localhost}/push'
             php occ config:app:set notify_push binary_path --value='/usr/local/bin/notify_push'
-            echo -e '${GREEN}✅ notify_push configured${NC}'
+            echo -e '${GREEN}✅ notify_push configured with external domain${NC}'
         "
     fi
 fi
@@ -74,6 +74,8 @@ if [ "${INSTALL_COLLABORA:-false}" = "true" ]; then
         configure_app "richdocuments" "
             php occ config:app:set richdocuments wopi_url --value='https://${NEXTCLOUD_DOMAIN:-localhost}/collabora/'
             php occ config:app:set richdocuments public_wopi_url --value='https://${NEXTCLOUD_DOMAIN:-localhost}/collabora/'
+            php occ config:app:set richdocuments disable_certificate_verification --value='yes'
+            php occ config:app:set richdocuments timeout --value='60'
             echo -e '${GREEN}✅ Nextcloud Office configured for Collabora${NC}'
         "
     fi
