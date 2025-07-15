@@ -357,8 +357,8 @@ services:
     container_name: nextcloud_nginx
     restart: unless-stopped
     ports:
-      # Expose only on localhost for external nginx to proxy to
-      - "127.0.0.1:${NGINX_INTERNAL_PORT:-11000}:80"
+      # Expose on all interfaces for external nginx to proxy to (separate LXCs)
+      - "${NGINX_INTERNAL_PORT:-11000}:80"
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
       - ${DATA_LOCATION:-nextcloud_data}:/var/www/html:ro
