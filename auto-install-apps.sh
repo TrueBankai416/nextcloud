@@ -12,7 +12,7 @@ NC='\033[0m' # No Color
 # Function to check if app is installed
 is_app_installed() {
     local app_name=$1
-    if php occ app:list | grep -q "^  - $app_name:"; then
+    if php occ app:list | grep -A 100 "Enabled:" | grep -B 100 "Disabled:" | grep -q "^  - $app_name:"; then
         return 0
     else
         return 1
@@ -123,4 +123,4 @@ echo -e "${GREEN}🎉 App auto-installation completed!${NC}"
 
 # Show installed apps
 echo -e "${YELLOW}📦 Installed apps:${NC}"
-php occ app:list --output=json | jq -r '.enabled | keys[]' | sort
+php occ app:list | grep -A 100 "Enabled:" | grep -B 100 "Disabled:" | grep "^  - " | sort
