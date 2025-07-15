@@ -125,9 +125,9 @@ if [ "${INSTALL_MEMORIES:-false}" = "true" ] || [ "${INSTALL_PREVIEW_GENERATOR:-
             php occ config:app:set previewgenerator squareSizes --value='256,512'
             php occ config:app:set previewgenerator widthSizes --value='256,512,1024,2048'
             php occ config:app:set previewgenerator heightSizes --value='256,512,1024,2048'
-            php occ config:system:set preview_max_x --value=2048
-            php occ config:system:set preview_max_y --value=2048
-            php occ config:system:set jpeg_quality --value=60
+            php occ config:system:set preview_max_x --value=2048 --type=integer
+            php occ config:system:set preview_max_y --value=2048 --type=integer
+            php occ config:system:set jpeg_quality --value=60 --type=integer
             echo -e '${GREEN}✅ Preview Generator configured${NC}'
         "
     fi
