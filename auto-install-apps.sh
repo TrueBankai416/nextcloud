@@ -63,6 +63,9 @@ if [ "${INSTALL_NOTIFY_PUSH:-false}" = "true" ]; then
         configure_app "notify_push" "
             php occ config:app:set notify_push base_endpoint --value='wss://${NEXTCLOUD_DOMAIN:-localhost}/push'
             php occ config:app:set notify_push binary_path --value='/usr/local/bin/notify_push'
+            # Force update if already configured
+            php occ config:app:delete notify_push base_endpoint
+            php occ config:app:set notify_push base_endpoint --value='wss://${NEXTCLOUD_DOMAIN:-localhost}/push'
             echo -e '${GREEN}✅ notify_push configured with external domain${NC}'
         "
     fi
