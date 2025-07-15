@@ -60,6 +60,7 @@ RUN echo '12 * * * * /usr/local/bin/conditional-cron.sh face' >> /var/spool/cron
 RUN echo '37 * * * * /usr/local/bin/conditional-cron.sh preview' >> /var/spool/cron/crontabs/www-data
 RUN echo '15 2 * * * /usr/local/bin/conditional-cron.sh memories' >> /var/spool/cron/crontabs/www-data
 RUN echo '45 3 * * * /usr/local/bin/conditional-cron.sh recognize' >> /var/spool/cron/crontabs/www-data
+RUN echo '0 4 * * * /usr/local/bin/conditional-cron.sh previewgenerator' >> /var/spool/cron/crontabs/www-data
 
 # Enable the repository for pdlib and install dlib
 RUN mkdir -m 0755 -p /etc/apt/keyrings/ \

@@ -75,6 +75,10 @@ case "$1" in
         # Memories indexing
         run_conditional_job "memories" "memories:index" "Memories Indexing"
         ;;
+    "previewgenerator")
+        # Preview generation for all files
+        run_conditional_job "previewgenerator" "preview:generate-all" "Preview Generator"
+        ;;
     "general")
         # General Nextcloud cron
         echo -e "${GREEN}[$(date)] Running general Nextcloud cron...${NC}"

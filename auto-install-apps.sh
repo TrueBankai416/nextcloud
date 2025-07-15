@@ -107,7 +107,26 @@ if [ "${INSTALL_RECOGNIZE:-false}" = "true" ]; then
         configure_app "recognize" "
             php occ config:app:set recognize enabled --value='yes'
             php occ config:app:set recognize tensorflow.gpu --value='${NVIDIA_VISIBLE_DEVICES:+true}'
-            echo -e '${GREEN}✅ Recognize configured${NC}'
+            php occ config:app:set recognize face_recognition_enabled --value='true'
+            php occ config:app:set recognize face_recognition_model --value='1'
+            php occ config:app:set recognize clustering_enabled --value='true'
+            php occ config:app:set recognize clustering_faces_threshold --value='0.4'
+            echo -e '${GREEN}✅ Recognize configured with face recognition enabled${NC}'
+        "
+    fi
+fi
+
+# Install Preview Generator app (improves Memories performance)
+if [ "${INSTALL_MEMORIES:-false}" = "true" ] || [ "${INSTALL_PREVIEW_GENERATOR:-true}" = "true" ]; then
+    if install_app "previewgenerator" "Preview Generator"; then
+        configure_app "previewgenerator" "
+            php occ config:app:set previewgenerator squareSizes --value='256,512'
+            php occ config:app:set previewgenerator widthSizes --value='256,512,1024,2048'
+            php occ config:app:set previewgenerator heightSizes --value='256,512,1024,2048'
+            php occ config:system:set preview_max_x --value=2048
+            php occ config:system:set preview_max_y --value=2048
+            php occ config:system:set jpeg_quality --value=60
+            echo -e '${GREEN}✅ Preview Generator configured${NC}'
         "
     fi
 fi
