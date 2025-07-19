@@ -48,7 +48,10 @@ if ! docker ps | grep -q "mariadb"; then
 fi
 
 echo "Checking current background jobs status..."
-run_in_container php occ background:job:list --limit 10
+# Try different command variations as they vary between Nextcloud versions
+run_in_container php occ background-job:list --limit 10 2>/dev/null || \
+run_in_container php occ background:job:list --limit 10 2>/dev/null || \
+echo "Note: Unable to list background jobs - command format may vary by Nextcloud version"
 
 echo ""
 echo "Counting stuck jobs (jobs with timestamp 1970-01-01 or 0)..."
@@ -81,12 +84,12 @@ if [ "$STUCK_COUNT" -gt 0 ]; then
         
         echo "Cleanup completed!"
         
-        # Reset the job system
-        echo "Resetting background job system..."
-        run_in_container php occ background:cron
+        # Reset the background job system to use cron
+        echo "Setting background job system to use cron..."
+        run_in_container php occ background:cron || echo "Note: background:cron command may not exist in your Nextcloud version - this is OK."
         
-        echo "Running one background job to test..."
-        run_in_container php occ background:job:execute --force-execute
+        echo "Testing by running cron.php directly..."
+        run_in_container php /var/www/html/cron.php
         
         echo ""
         echo "Cleanup completed successfully!"
