@@ -4,6 +4,18 @@ set -e
 echo "Nextcloud Background Jobs Cleanup Script"
 echo "========================================"
 
+# Load environment variables from .env file
+if [ -f .env ]; then
+    echo "Loading configuration from .env file..."
+    # Source .env file more safely
+    set -a  # automatically export all variables
+    source .env
+    set +a  # stop automatically exporting
+else
+    echo "Warning: .env file not found. Please ensure you're running this from the directory containing your .env file."
+    exit 1
+fi
+
 # Function to run commands in the nextcloud container
 run_in_container() {
     docker exec -u www-data nextcloud "$@"

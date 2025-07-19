@@ -34,12 +34,7 @@ docker-compose up -d
 # Make the cleanup script executable
 chmod +x cleanup-stuck-jobs.sh
 
-# Set your database credentials in environment or modify the script
-export MYSQL_USER=your_mysql_user
-export MYSQL_PASSWORD=your_mysql_password  
-export MYSQL_DATABASE=your_mysql_database
-
-# Run the cleanup
+# Run the cleanup (it automatically loads credentials from your .env file)
 ./cleanup-stuck-jobs.sh
 ```
 
