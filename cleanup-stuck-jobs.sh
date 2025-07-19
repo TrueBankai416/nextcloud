@@ -1,6 +1,32 @@
 #!/bin/bash
 set -e
 
+# Parse command line arguments
+LIMIT=10
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -l|--limit)
+            LIMIT="$2"
+            shift 2
+            ;;
+        -l=*|--limit=*)
+            LIMIT="${1#*=}"
+            shift
+            ;;
+        -h|--help)
+            echo "Usage: $0 [-l|--limit NUMBER]"
+            echo "  -l, --limit NUMBER    Number of background jobs to display (default: 10)"
+            echo "  -h, --help           Show this help message"
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1"
+            echo "Use -h or --help for usage information"
+            exit 1
+            ;;
+    esac
+done
+
 echo "Nextcloud Background Jobs Cleanup Script"
 echo "========================================"
 
@@ -47,18 +73,19 @@ if ! docker ps | grep -q "mariadb"; then
     exit 1
 fi
 
-echo "Checking current background jobs status..."
+echo "Checking current background jobs status (showing up to $LIMIT jobs)..."
 # Try different command variations as they vary between Nextcloud versions
-run_in_container php occ background-job:list --limit 10 2>/dev/null || \
-run_in_container php occ background:job:list --limit 10 2>/dev/null || \
+run_in_container php occ background-job:list --limit "$LIMIT" 2>/dev/null || \
+run_in_container php occ background:job:list --limit "$LIMIT" 2>/dev/null || \
 echo "Note: Unable to list background jobs - command format may vary by Nextcloud version"
 
 echo ""
 echo "Counting stuck jobs (jobs with timestamp 1970-01-01 or 0)..."
+echo "Note: This scans ALL jobs in the database, not just the $LIMIT displayed above."
 
 # Count stuck jobs
 STUCK_COUNT=$(run_db_command "SELECT COUNT(*) as count FROM oc_jobs WHERE last_run = 0 OR last_run < 946684800;" | tail -n1)
-echo "Found $STUCK_COUNT stuck jobs"
+echo "Found $STUCK_COUNT stuck jobs (out of total database scan)"
 
 if [ "$STUCK_COUNT" -gt 0 ]; then
     echo ""
