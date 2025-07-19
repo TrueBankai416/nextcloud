@@ -46,9 +46,8 @@ RUN docker-php-ext-install pdlib
 # Install the bz2 PHP extension
 RUN docker-php-ext-install bz2
 
-# Add cron jobs for Nextcloud's background tasks
-RUN echo '12 * * * * php /var/www/html/occ face:background_job' >> /var/spool/cron/crontabs/www-data
-RUN echo '37 * * * * php /var/www/html/occ preview:pre-generate' >> /var/spool/cron/crontabs/www-data
+# Set up proper Nextcloud cron job - runs every 5 minutes as recommended
+RUN echo '*/5 * * * * php /var/www/html/cron.php' >> /var/spool/cron/crontabs/www-data
 
 # Install additional utilities
 RUN apt update \
