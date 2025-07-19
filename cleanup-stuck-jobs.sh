@@ -7,10 +7,16 @@ echo "========================================"
 # Load environment variables from .env file
 if [ -f .env ]; then
     echo "Loading configuration from .env file..."
-    # Source .env file more safely
-    set -a  # automatically export all variables
-    source .env
-    set +a  # stop automatically exporting
+    # Parse .env file safely, only extracting valid variable assignments
+    while IFS= read -r line; do
+        # Skip empty lines and comments
+        [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+        
+        # Only process lines that look like valid variable assignments
+        if [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
+            export "$line"
+        fi
+    done < .env
 else
     echo "Warning: .env file not found. Please ensure you're running this from the directory containing your .env file."
     exit 1
@@ -23,7 +29,11 @@ run_in_container() {
 
 # Function to run database commands
 run_db_command() {
-    docker exec -i mariadb mysql -u "${MYSQL_USER:-nextcloud}" -p"${MYSQL_PASSWORD}" "${MYSQL_DATABASE:-nextcloud}" -e "$1"
+    if [ -z "$MYSQL_PASSWORD" ]; then
+        echo "Error: MYSQL_PASSWORD not found in .env file"
+        exit 1
+    fi
+    docker exec -i mariadb mysql -u "${MYSQL_USER:-nextcloud}" -p"${MYSQL_PASSWORD}" "${MYSQL_DATABASE:-nextcloud}" -h "${MYSQL_HOST:-mariadb}" -e "$1"
 }
 
 # Check if containers are running
