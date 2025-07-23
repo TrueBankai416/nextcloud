@@ -71,6 +71,9 @@ RUN docker-php-ext-install pdlib-master
 # Increase PHP memory limit for Nextcloud
 RUN echo memory_limit=1024M > /usr/local/etc/php/conf.d/memory-limit.ini
 
+# Enable proc_open function (required by Memories app and other Nextcloud apps)
+RUN echo 'disable_functions =' > /usr/local/etc/php/conf.d/enable-functions.ini
+
 RUN echo 'apc.enable_cli=1' >> "${PHP_INI_DIR}/conf.d/docker-php-ext-apcu.ini"
 
 # Increase opcache memory
