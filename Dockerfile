@@ -146,11 +146,12 @@ COPY nginx.conf /etc/nginx/nginx.conf
 COPY auto-install-apps.sh /usr/local/bin/auto-install-apps.sh
 
 # Copy and adjust permissions for cron and setup scripts
+COPY conditional-cron.sh /usr/local/bin/conditional-cron.sh
 COPY cron.sh /
 COPY setup-notify-push.sh /
 COPY docker-entrypoint.sh /
 COPY init-notify-push.sh /
-RUN chmod +x /cron.sh /setup-notify-push.sh /docker-entrypoint.sh /init-notify-push.sh /usr/local/bin/auto-install-apps.sh \
+RUN chmod +x /cron.sh /setup-notify-push.sh /docker-entrypoint.sh /init-notify-push.sh /usr/local/bin/auto-install-apps.sh /usr/local/bin/conditional-cron.sh \
     && sed -i 's/\r$//' /cron.sh /setup-notify-push.sh /docker-entrypoint.sh /init-notify-push.sh /usr/local/bin/auto-install-apps.sh /usr/local/bin/conditional-cron.sh
 
 # Create directory for supervisor logs
