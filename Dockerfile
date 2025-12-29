@@ -53,9 +53,8 @@ RUN docker-php-ext-install pdlib
 # Install the bz2 PHP extension
 RUN docker-php-ext-install bz2
 
-# Copy conditional cron script
-COPY conditional-cron.sh /usr/local/bin/conditional-cron.sh
-RUN chmod +x /usr/local/bin/conditional-cron.sh
+# Set up proper Nextcloud cron job - runs every 5 minutes as recommended
+RUN echo '*/5 * * * * php /var/www/html/cron.php' >> /var/spool/cron/crontabs/www-data
 
 # Add conditional cron jobs for Nextcloud's background tasks
 RUN echo '*/5 * * * * /usr/local/bin/conditional-cron.sh general' >> /var/spool/cron/crontabs/www-data
