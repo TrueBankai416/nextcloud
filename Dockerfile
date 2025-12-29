@@ -1,5 +1,5 @@
 # Use the Nextcloud production image as the base
-FROM nextcloud:production
+FROM nextcloud:31.0.5
 
 # Install gosu (Debian/Ubuntu)
 RUN apt-get update && apt-get install -y gosu && rm -rf /var/lib/apt/lists/*
@@ -28,6 +28,9 @@ RUN apt-get update \
     gnupg2 \
     unzip \
  && apt-get clean
+
+# Enable Apache modules for reverse proxy
+RUN a2enmod proxy proxy_http proxy_wstunnel headers rewrite
 
 RUN pecl install inotify && \
     echo "extension=inotify.so" | tee /usr/local/etc/php/conf.d/docker-php-ext-inotify.ini
@@ -134,12 +137,19 @@ RUN NOTIFY_PUSH_VERSION=$(curl -s https://api.github.com/repos/nextcloud/notify_
 # Copy supervisord configuration
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 
+# Copy nginx configuration (for reference/optional standalone nginx)
+COPY nginx.conf /etc/nginx/nginx.conf
+
+# Copy auto-install-apps script
+COPY auto-install-apps.sh /usr/local/bin/auto-install-apps.sh
+
 # Copy and adjust permissions for cron and setup scripts
 COPY cron.sh /
 COPY setup-notify-push.sh /
 COPY docker-entrypoint.sh /
 COPY init-notify-push.sh /
-RUN chmod +x /cron.sh /setup-notify-push.sh /docker-entrypoint.sh /init-notify-push.sh
+RUN chmod +x /cron.sh /setup-notify-push.sh /docker-entrypoint.sh /init-notify-push.sh /usr/local/bin/auto-install-apps.sh \
+    && sed -i 's/\r$//' /cron.sh /setup-notify-push.sh /docker-entrypoint.sh /init-notify-push.sh /usr/local/bin/auto-install-apps.sh /usr/local/bin/conditional-cron.sh
 
 # Create directory for supervisor logs
 RUN mkdir -p /var/log/supervisor
