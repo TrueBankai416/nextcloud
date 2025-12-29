@@ -1,5 +1,5 @@
 # Use the Nextcloud production image as the base
-FROM nextcloud:production
+FROM nextcloud:31.0.5
 
 # Install gosu (Debian/Ubuntu)
 RUN apt-get update && apt-get install -y gosu && rm -rf /var/lib/apt/lists/*
@@ -11,7 +11,6 @@ RUN apt-get update \
     cmake \
     ffmpeg \
     ghostscript \
-    ghostwriter \
     git \
     imagemagick \
     inotify-tools \
@@ -22,8 +21,16 @@ RUN apt-get update \
     sudo \
     nano \
     libmagickcore-6.q16-6-extra \
-#    systemd \
+    exiftool \
+    supervisor \
+    curl \
+    wget \
+    gnupg2 \
+    unzip \
  && apt-get clean
+
+# Enable Apache modules for reverse proxy
+RUN a2enmod proxy proxy_http proxy_wstunnel headers rewrite
 
 RUN pecl install inotify && \
     echo "extension=inotify.so" | tee /usr/local/etc/php/conf.d/docker-php-ext-inotify.ini
@@ -49,9 +56,13 @@ RUN docker-php-ext-install bz2
 # Set up proper Nextcloud cron job - runs every 5 minutes as recommended
 RUN echo '*/5 * * * * php /var/www/html/cron.php' >> /var/spool/cron/crontabs/www-data
 
-# Install additional utilities
-RUN apt update \
-  && apt install -y wget gnupg2 unzip
+# Add conditional cron jobs for Nextcloud's background tasks
+RUN echo '*/5 * * * * /usr/local/bin/conditional-cron.sh general' >> /var/spool/cron/crontabs/www-data
+RUN echo '12 * * * * /usr/local/bin/conditional-cron.sh face' >> /var/spool/cron/crontabs/www-data  
+RUN echo '37 * * * * /usr/local/bin/conditional-cron.sh preview' >> /var/spool/cron/crontabs/www-data
+RUN echo '15 2 * * * /usr/local/bin/conditional-cron.sh memories' >> /var/spool/cron/crontabs/www-data
+RUN echo '45 3 * * * /usr/local/bin/conditional-cron.sh recognize' >> /var/spool/cron/crontabs/www-data
+RUN echo '0 4 * * * /usr/local/bin/conditional-cron.sh previewgenerator' >> /var/spool/cron/crontabs/www-data
 
 # Enable the repository for pdlib and install dlib
 RUN mkdir -m 0755 -p /etc/apt/keyrings/ \
@@ -120,21 +131,41 @@ RUN set -ex; \
     apt-get purge -y --auto-remove -o APT::AutoRemove::RecommendsImportant=false; \
     rm -rf /var/lib/apt/lists/*
 
-# Copy and adjust permissions for cron
-COPY cron.sh /
-RUN chmod +x /cron.sh
+# Install notify_push binary
+RUN NOTIFY_PUSH_VERSION=$(curl -s https://api.github.com/repos/nextcloud/notify_push/releases/latest | grep -oP '"tag_name": "\K(.*)(?=")') \
+ && wget -O /usr/local/bin/notify_push "https://github.com/nextcloud/notify_push/releases/download/${NOTIFY_PUSH_VERSION}/notify_push-x86_64-unknown-linux-musl" \
+ && chmod +x /usr/local/bin/notify_push
 
-# Copy notify_push services
-#COPY notify_push.service /etc/systemd/system/
-#COPY notify_push-watcher.service /etc/systemd/system/
-#RUN chmod +x /etc/systemd/system/notify_push.service /etc/systemd/system/notify_push-watcher.service
+# Copy supervisord configuration
+COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
+
+# Copy nginx configuration (for reference/optional standalone nginx)
+COPY nginx.conf /etc/nginx/nginx.conf
+
+# Copy auto-install-apps script
+COPY auto-install-apps.sh /usr/local/bin/auto-install-apps.sh
+
+# Copy and adjust permissions for cron and setup scripts
+COPY cron.sh /
+COPY setup-notify-push.sh /
+COPY docker-entrypoint.sh /
+COPY init-notify-push.sh /
+RUN chmod +x /cron.sh /setup-notify-push.sh /docker-entrypoint.sh /init-notify-push.sh /usr/local/bin/auto-install-apps.sh \
+    && sed -i 's/\r$//' /cron.sh /setup-notify-push.sh /docker-entrypoint.sh /init-notify-push.sh /usr/local/bin/auto-install-apps.sh /usr/local/bin/conditional-cron.sh
+
+# Create directory for supervisor logs
+RUN mkdir -p /var/log/supervisor
 
 # Set an environment variable to indicate that Nextcloud should be updated
 ENV NEXTCLOUD_UPDATE=1
 
-# Set the command to run supervisord on container start
+# Expose notify_push port
+EXPOSE 7867
+
 # Health check to ensure Nextcloud is running and accessible
-# The health check pings the Nextcloud status.php page and expects an HTTP 200 response
-# Adjust the interval, timeout, start period, and retries as necessary for your environment
 HEALTHCHECK --interval=1m --timeout=10s --start-period=30s --retries=3 \
   CMD curl -f http://localhost/status.php || exit 1
+
+# Use custom entrypoint that sets up notify_push
+ENTRYPOINT ["/docker-entrypoint.sh"]
+CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
