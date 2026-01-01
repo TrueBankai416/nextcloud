@@ -53,16 +53,16 @@ RUN docker-php-ext-install pdlib
 # Install the bz2 PHP extension
 RUN docker-php-ext-install bz2
 
-# Set up proper Nextcloud cron job - runs every 5 minutes as recommended
-RUN echo '*/5 * * * * php /var/www/html/cron.php' >> /var/spool/cron/crontabs/www-data
+# General background stuff – OK every 5 min
+RUN echo '*/5 * * * * flock -n /tmp/nextcloud-cron.lock php -f /var/www/html/cron.php' >> /var/spool/cron/crontabs/www-data
+RUN echo '*/10 * * * * flock -n /tmp/nextcloud-general.lock /usr/local/bin/conditional-cron.sh general' >> /var/spool/cron/crontabs/www-data
 
-# Add conditional cron jobs for Nextcloud's background tasks
-RUN echo '*/5 * * * * /usr/local/bin/conditional-cron.sh general' >> /var/spool/cron/crontabs/www-data
-RUN echo '12 * * * * /usr/local/bin/conditional-cron.sh face' >> /var/spool/cron/crontabs/www-data  
-RUN echo '37 * * * * /usr/local/bin/conditional-cron.sh preview' >> /var/spool/cron/crontabs/www-data
-RUN echo '15 2 * * * /usr/local/bin/conditional-cron.sh memories' >> /var/spool/cron/crontabs/www-data
-RUN echo '45 3 * * * /usr/local/bin/conditional-cron.sh recognize' >> /var/spool/cron/crontabs/www-data
-RUN echo '0 4 * * * /usr/local/bin/conditional-cron.sh previewgenerator' >> /var/spool/cron/crontabs/www-data
+# Heavy stuff – once nightly or off-peak
+RUN echo '15 2 * * * flock -n /tmp/nextcloud-memories.lock /usr/local/bin/conditional-cron.sh memories' >> /var/spool/cron/crontabs/www-data
+RUN echo '30 2 * * * flock -n /tmp/nextcloud-face.lock /usr/local/bin/conditional-cron.sh face' >> /var/spool/cron/crontabs/www-data
+RUN echo '45 2 * * * flock -n /tmp/nextcloud-recognize.lock /usr/local/bin/conditional-cron.sh recognize' >> /var/spool/cron/crontabs/www-data
+RUN echo '0 3 * * * flock -n /tmp/nextcloud-preview.lock /usr/local/bin/conditional-cron.sh preview' >> /var/spool/cron/crontabs/www-data
+RUN echo '30 3 * * * flock -n /tmp/nextcloud-previewgen.lock /usr/local/bin/conditional-cron.sh previewgenerator' >> /var/spool/cron/crontabs/www-data
 
 # Enable the repository for pdlib and install dlib
 RUN mkdir -m 0755 -p /etc/apt/keyrings/ \

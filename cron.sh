@@ -12,4 +12,5 @@ chmod 600 /var/spool/cron/crontabs/www-data
 
 # Start cron daemon
 echo "Starting cron daemon..."
+pkill crond 2>/dev/null || true
 exec busybox crond -f -L /dev/stdout
