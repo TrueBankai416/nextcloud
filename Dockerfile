@@ -1,5 +1,5 @@
 # Use the Nextcloud production image as the base
-FROM nextcloud:31.0.5
+FROM nextcloud:production
 
 # Install gosu (Debian/Ubuntu)
 RUN apt-get update && apt-get install -y gosu && rm -rf /var/lib/apt/lists/*
@@ -20,7 +20,7 @@ RUN apt-get update \
     libx11-dev \
     sudo \
     nano \
-    libmagickcore-6.q16-6-extra \
+    libmagickcore-7.q16-10-extra \
     exiftool \
     supervisor \
     curl \
@@ -64,13 +64,10 @@ RUN echo '45 2 * * * flock -n /tmp/nextcloud-recognize.lock /usr/local/bin/condi
 RUN echo '0 3 * * * flock -n /tmp/nextcloud-preview.lock /usr/local/bin/conditional-cron.sh preview' >> /var/spool/cron/crontabs/www-data
 RUN echo '30 3 * * * flock -n /tmp/nextcloud-previewgen.lock /usr/local/bin/conditional-cron.sh previewgenerator' >> /var/spool/cron/crontabs/www-data
 
-# Enable the repository for pdlib and install dlib
-RUN mkdir -m 0755 -p /etc/apt/keyrings/ \
-  && wget -qO - https://repo.delellis.com.ar/repo.gpg.key | sudo apt-key add - \
-  && wget -O- https://repo.delellis.com.ar/repo.gpg.key | gpg --dearmor | sudo tee /etc/apt/keyrings/php-pdlib.gpg > /dev/null \
-  && echo "deb [signed-by=/etc/apt/keyrings/php-pdlib.gpg arch=amd64] https://repo.delellis.com.ar bullseye bullseye" | sudo tee /etc/apt/sources.list.d/php-pdlib.list \
-RUN apt update \
-  && apt install -y libdlib-dev
+# Install dlib development headers from Debian repositories
+RUN apt-get update \
+  && apt-get install -y libdlib-dev \
+  && rm -rf /var/lib/apt/lists/*
 
 # Install pdlib extension from a downloaded archive
 RUN wget https://github.com/goodspb/pdlib/archive/master.zip \
@@ -105,15 +102,11 @@ RUN set -ex; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
         libbz2-dev \
-        libc-client-dev \
-        libkrb5-dev \
         libsmbclient-dev \
     ; \
     \
-    docker-php-ext-configure imap --with-kerberos --with-imap-ssl; \
     docker-php-ext-install \
         bz2 \
-        imap \
     ; \
     pecl install smbclient; \
     docker-php-ext-enable smbclient; \
