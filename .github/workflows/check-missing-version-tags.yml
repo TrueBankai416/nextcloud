@@ -11,10 +11,18 @@ on:
         description: Docker Hub repository name
         required: true
         default: nextcloud
-      start_patch:
-        description: Starting patch number to check (inclusive)
+      from_version:
+        description: First strict version to consider (inclusive), for example 32.0.7
         required: true
-        default: "7"
+        default: "32.0.7"
+      to_version:
+        description: Last strict version to consider (inclusive). Use auto to use nextcloud:production NEXTCLOUD_VERSION
+        required: true
+        default: auto
+      major_filter:
+        description: Optional major to limit checks to (for example 32). Leave empty to include all majors in range
+        required: false
+        default: ""
       fail_on_missing:
         description: Fail the workflow if any versions are missing
         required: true
@@ -73,7 +81,9 @@ jobs:
           TARGET_VERSION: ${{ steps.target.outputs.target_version }}
           DOCKERHUB_NAMESPACE: ${{ inputs.dockerhub_namespace }}
           DOCKERHUB_REPOSITORY: ${{ inputs.dockerhub_repository }}
-          START_PATCH: ${{ inputs.start_patch }}
+          FROM_VERSION: ${{ inputs.from_version }}
+          TO_VERSION: ${{ inputs.to_version }}
+          MAJOR_FILTER: ${{ inputs.major_filter }}
         run: |
           set -euo pipefail
 
@@ -86,59 +96,96 @@ jobs:
           target = os.environ["TARGET_VERSION"].strip()
           namespace = os.environ["DOCKERHUB_NAMESPACE"].strip()
           repository = os.environ["DOCKERHUB_REPOSITORY"].strip()
-          start_patch_raw = os.environ["START_PATCH"].strip()
+          from_version = os.environ["FROM_VERSION"].strip()
+          to_version_raw = os.environ["TO_VERSION"].strip()
+          major_filter_raw = os.environ["MAJOR_FILTER"].strip()
 
-          m = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", target)
-          if not m:
-              raise SystemExit(f"Invalid target version format: {target}")
+          semver_re = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
 
-          major, minor, target_patch = map(int, m.groups())
+          def parse_semver(version: str):
+            m = semver_re.fullmatch(version)
+            if not m:
+              raise SystemExit(f"Invalid strict version format: {version}")
+            return tuple(map(int, m.groups()))
 
-          if not re.fullmatch(r"\d+", start_patch_raw):
-              raise SystemExit(f"start_patch must be a non-negative integer, got: {start_patch_raw}")
+          def format_semver(v):
+            return f"{v[0]}.{v[1]}.{v[2]}"
 
-          start_patch = int(start_patch_raw)
-          if start_patch > target_patch:
-              raise SystemExit(
-                  f"start_patch ({start_patch}) cannot be greater than target patch ({target_patch})"
-              )
-
-          url = f"https://hub.docker.com/v2/repositories/{namespace}/{repository}/tags?page_size=100"
-          patch_numbers = set()
-
-          while url:
+          def fetch_tags(repo_namespace: str, repo_name: str):
+            url = f"https://hub.docker.com/v2/repositories/{repo_namespace}/{repo_name}/tags?page_size=100"
+            tags = []
+            while url:
               with urllib.request.urlopen(url, timeout=30) as response:
-                  payload = json.load(response)
-
-              for item in payload.get("results", []):
-                  name = str(item.get("name", "")).strip()
-                  if not re.fullmatch(r"\d+\.\d+\.\d+", name):
-                      continue
-
-                  tag_major, tag_minor, tag_patch = map(int, name.split("."))
-                  if tag_major == major and tag_minor == minor:
-                      patch_numbers.add(tag_patch)
-
+                payload = json.load(response)
+              tags.extend(payload.get("results", []))
               url = payload.get("next")
+            return tags
 
-          expected_patches = list(range(start_patch, target_patch + 1))
-          present_versions = [f"{major}.{minor}.{p}" for p in expected_patches if p in patch_numbers]
-          missing_versions = [f"{major}.{minor}.{p}" for p in expected_patches if p not in patch_numbers]
+          range_start = parse_semver(from_version)
+          range_end = parse_semver(target if to_version_raw == "auto" else to_version_raw)
+
+          if range_start > range_end:
+            raise SystemExit(
+              "from_version cannot be greater than to_version. "
+              f"Got {format_semver(range_start)} > {format_semver(range_end)}"
+            )
+
+          major_filter = None
+          if major_filter_raw:
+            if not re.fullmatch(r"\d+", major_filter_raw):
+              raise SystemExit(f"major_filter must be an integer, got: {major_filter_raw}")
+            major_filter = int(major_filter_raw)
+
+          upstream_versions = set()
+          for item in fetch_tags("library", "nextcloud"):
+            name = str(item.get("name", "")).strip()
+            m = semver_re.fullmatch(name)
+            if not m:
+              continue
+            v = tuple(map(int, m.groups()))
+            if not (range_start <= v <= range_end):
+              continue
+            if major_filter is not None and v[0] != major_filter:
+              continue
+            upstream_versions.add(v)
+
+          if not upstream_versions:
+            raise SystemExit(
+              "No upstream strict numeric Nextcloud tags found in selected scope. "
+              "Adjust from_version/to_version/major_filter."
+            )
+
+          mirror_versions = set()
+          for item in fetch_tags(namespace, repository):
+            name = str(item.get("name", "")).strip()
+            m = semver_re.fullmatch(name)
+            if not m:
+              continue
+            mirror_versions.add(tuple(map(int, m.groups())))
+
+          expected_versions_sorted = sorted(upstream_versions)
+          present_versions = [format_semver(v) for v in expected_versions_sorted if v in mirror_versions]
+          missing_versions = [format_semver(v) for v in expected_versions_sorted if v not in mirror_versions]
 
           output_path = os.environ["GITHUB_OUTPUT"]
           with open(output_path, "a", encoding="utf-8") as f:
-              f.write(f"major_minor={major}.{minor}\n")
-              f.write(f"target_patch={target_patch}\n")
-              f.write(f"present_count={len(present_versions)}\n")
-              f.write(f"missing_count={len(missing_versions)}\n")
-              f.write("present_versions<<EOF\n")
-              f.write("\n".join(present_versions) + "\n")
-              f.write("EOF\n")
-              f.write("missing_versions<<EOF\n")
-              f.write("\n".join(missing_versions) + "\n")
-              f.write("EOF\n")
+            f.write(f"from_version={format_semver(range_start)}\n")
+            f.write(f"to_version={format_semver(range_end)}\n")
+            f.write(f"major_filter={'' if major_filter is None else major_filter}\n")
+            f.write(f"expected_count={len(expected_versions_sorted)}\n")
+            f.write(f"present_count={len(present_versions)}\n")
+            f.write(f"missing_count={len(missing_versions)}\n")
+            f.write("present_versions<<EOF\n")
+            f.write("\n".join(present_versions) + "\n")
+            f.write("EOF\n")
+            f.write("missing_versions<<EOF\n")
+            f.write("\n".join(missing_versions) + "\n")
+            f.write("EOF\n")
 
-          print(f"Checked {major}.{minor}.{start_patch} through {major}.{minor}.{target_patch}")
+          print(f"Checked upstream strict numeric tags from {format_semver(range_start)} to {format_semver(range_end)}")
+          if major_filter is not None:
+            print(f"Applied major filter: {major_filter}")
+          print(f"Expected upstream versions in scope: {len(expected_versions_sorted)}")
           print(f"Present strict numeric tags: {len(present_versions)}")
           print(f"Missing strict numeric tags: {len(missing_versions)}")
           PY
@@ -233,7 +280,13 @@ jobs:
             echo ""
             echo "- Docker Hub repository: ${{ inputs.dockerhub_namespace }}/${{ inputs.dockerhub_repository }}"
             echo "- Upstream target version: ${{ steps.target.outputs.target_version }}"
-            echo "- Version line checked: ${{ steps.compare.outputs.major_minor }}.${{ inputs.start_patch }} through ${{ steps.compare.outputs.major_minor }}.${{ steps.compare.outputs.target_patch }}"
+            echo "- Version range checked: ${{ steps.compare.outputs.from_version }} through ${{ steps.compare.outputs.to_version }}"
+            if [ -n "${{ steps.compare.outputs.major_filter }}" ]; then
+              echo "- Major filter: ${{ steps.compare.outputs.major_filter }}"
+            else
+              echo "- Major filter: none"
+            fi
+            echo "- Upstream strict versions expected in scope: ${{ steps.compare.outputs.expected_count }}"
             echo "- Present strict numeric tags: ${{ steps.compare.outputs.present_count }}"
             echo "- Missing strict numeric tags: ${{ steps.compare.outputs.missing_count }}"
             echo "- Build missing versions: ${{ inputs.build_and_push_missing }}"
