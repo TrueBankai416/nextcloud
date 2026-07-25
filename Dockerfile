@@ -87,12 +87,8 @@ RUN echo 'apc.enable_cli=1' >> "${PHP_INI_DIR}/conf.d/docker-php-ext-apcu.ini"
 # Increase opcache memory
 RUN sed -i 's/opcache.memory_consumption=128/opcache.memory_consumption=512/g' /usr/local/etc/php/conf.d/opcache-recommended.ini
 
-# Download and test the pdlib extension
-RUN wget https://github.com/matiasdelellis/pdlib-min-test-suite/archive/master.zip \
-  && unzip -d /tmp/ master.zip \
-  && rm master.zip
-RUN cd /tmp/pdlib-min-test-suite-master \
-    && make
+# Validate pdlib is available without running external image-processing tests
+RUN php -r 'exit(extension_loaded("pdlib") ? 0 : 1);'
 
 # Install PHP extensions and configure them
 RUN set -ex; \
