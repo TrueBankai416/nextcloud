@@ -1,0 +1,131 @@
+name: Build and Publish Nextcloud Image
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/dockerhub-auto-build.yml
+      - Dockerfile
+      - docker-entrypoint.sh
+      - entrypoint.sh
+      - cron.sh
+      - conditional-cron.sh
+      - setup-notify-push.sh
+      - init-notify-push.sh
+      - auto-install-apps.sh
+      - supervisord.conf
+
+permissions:
+  contents: read
+
+env:
+  IMAGE_NAME: bankaitech/nextcloud
+  BASE_IMAGE: nextcloud:production
+
+concurrency:
+  group: dockerhub-auto-build-publish
+  cancel-in-progress: false
+
+jobs:
+  build-and-publish:
+    if: github.event_name != 'push' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Read upstream image digest and version
+        id: upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          docker pull "${BASE_IMAGE}"
+
+          base_digest="$(docker image inspect --format='{{ index .RepoDigests 0 }}' "${BASE_IMAGE}" | awk -F'@' '{print $2}')"
+          base_version="$(docker image inspect --format='{{ index .Config.Labels "org.opencontainers.image.version" }}' "${BASE_IMAGE}" || true)"
+
+          if [ -z "${base_version}" ] || [ "${base_version}" = "<no value>" ]; then
+            base_version="$(date -u +%Y.%m.%d)"
+          fi
+
+          safe_version="$(echo "${base_version}" | tr '/:@ ' '-' | tr -cd 'A-Za-z0-9._-')"
+          safe_version="$(printf '%s' "${safe_version}" | sed 's/^[.-]\+//')"
+          safe_version="${safe_version:0:128}"
+
+          if [ -z "${safe_version}" ]; then
+            safe_version="$(date -u +%Y.%m.%d)"
+          fi
+
+          echo "base_digest=${base_digest}" >> "${GITHUB_OUTPUT}"
+          echo "version_tag=${safe_version}" >> "${GITHUB_OUTPUT}"
+
+          echo "Upstream digest: ${base_digest}"
+          echo "Version tag: ${safe_version}"
+
+      - name: Check if rebuild is required
+        id: gate
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if ! docker pull "${IMAGE_NAME}:latest" >/tmp/docker_pull_latest.log 2>&1; then
+            echo "No latest image found (or not pullable), forcing build."
+            echo "should_build=true" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          previous_base_digest="$(docker image inspect --format='{{ index .Config.Labels "org.opencontainers.image.base.digest" }}' "${IMAGE_NAME}:latest" || true)"
+
+          if [ -z "${previous_base_digest}" ] || [ "${previous_base_digest}" = "<no value>" ]; then
+            echo "Latest image has no base digest label, forcing build."
+            echo "should_build=true" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          if [ "${previous_base_digest}" != "${{ steps.upstream.outputs.base_digest }}" ]; then
+            echo "Base image changed (${previous_base_digest} -> ${{ steps.upstream.outputs.base_digest }}), building."
+            echo "should_build=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "Base image digest unchanged, skipping build."
+            echo "should_build=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Generate image metadata
+        id: meta
+        if: steps.gate.outputs.should_build == 'true'
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest
+            type=raw,value=${{ steps.upstream.outputs.version_tag }}
+
+      - name: Build and push
+        if: steps.gate.outputs.should_build == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: |
+            ${{ steps.meta.outputs.labels }}
+            org.opencontainers.image.base.name=${{ env.BASE_IMAGE }}
+            org.opencontainers.image.base.digest=${{ steps.upstream.outputs.base_digest }}
+
+      - name: No changes detected
+        if: steps.gate.outputs.should_build != 'true'
+        run: echo "No upstream change detected. Image build skipped."
