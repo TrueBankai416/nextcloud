@@ -14,7 +14,6 @@ RUN apt-get update \
     git \
     imagemagick \
     inotify-tools \
-    libbz2-dev \
     liblapack-dev \
     libopenblas-dev \
     libx11-dev \
@@ -50,9 +49,6 @@ RUN git clone https://github.com/goodspb/pdlib.git /usr/src/php/ext/pdlib
 # Install the pdlib PHP extension
 RUN docker-php-ext-install pdlib
 
-# Install the bz2 PHP extension
-RUN docker-php-ext-install bz2
-
 # General background stuff – OK every 5 min
 RUN echo '*/5 * * * * flock -n /tmp/nextcloud-cron.lock php -f /var/www/html/cron.php' >> /var/spool/cron/crontabs/www-data
 RUN echo '*/10 * * * * flock -n /tmp/nextcloud-general.lock /usr/local/bin/conditional-cron.sh general' >> /var/spool/cron/crontabs/www-data
@@ -63,18 +59,6 @@ RUN echo '30 2 * * * flock -n /tmp/nextcloud-face.lock /usr/local/bin/conditiona
 RUN echo '45 2 * * * flock -n /tmp/nextcloud-recognize.lock /usr/local/bin/conditional-cron.sh recognize' >> /var/spool/cron/crontabs/www-data
 RUN echo '0 3 * * * flock -n /tmp/nextcloud-preview.lock /usr/local/bin/conditional-cron.sh preview' >> /var/spool/cron/crontabs/www-data
 RUN echo '30 3 * * * flock -n /tmp/nextcloud-previewgen.lock /usr/local/bin/conditional-cron.sh previewgenerator' >> /var/spool/cron/crontabs/www-data
-
-# Install dlib development headers from Debian repositories
-RUN apt-get update \
-  && apt-get install -y libdlib-dev \
-  && rm -rf /var/lib/apt/lists/*
-
-# Install pdlib extension from a downloaded archive
-RUN wget https://github.com/goodspb/pdlib/archive/master.zip \
-  && mkdir -p /usr/src/php/ext/ \
-  && unzip -d /usr/src/php/ext/ master.zip \
-  && rm master.zip
-RUN docker-php-ext-install pdlib-master
 
 # Increase PHP memory limit for Nextcloud
 RUN echo memory_limit=1024M > /usr/local/etc/php/conf.d/memory-limit.ini
