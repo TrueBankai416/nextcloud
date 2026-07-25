@@ -14,9 +14,17 @@ on:
       start_patch:
         description: Starting patch number to check (inclusive)
         required: true
-        default: "0"
+        default: "7"
       fail_on_missing:
         description: Fail the workflow if any versions are missing
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      build_and_push_missing:
+        description: Build and push missing numeric versions to Docker Hub
         required: true
         default: "false"
         type: choice
@@ -136,6 +144,88 @@ jobs:
           print(f"Missing strict numeric tags: {len(missing_versions)}")
           PY
 
+      - name: Set up Docker Buildx
+        if: inputs.build_and_push_missing == 'true' && steps.compare.outputs.missing_count != '0'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        if: inputs.build_and_push_missing == 'true' && steps.compare.outputs.missing_count != '0'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push missing versions
+        id: build_missing
+        if: inputs.build_and_push_missing == 'true' && steps.compare.outputs.missing_count != '0'
+        shell: bash
+        env:
+          DOCKERHUB_NAMESPACE: ${{ inputs.dockerhub_namespace }}
+          DOCKERHUB_REPOSITORY: ${{ inputs.dockerhub_repository }}
+          MISSING_VERSIONS: ${{ steps.compare.outputs.missing_versions }}
+        run: |
+          set -euo pipefail
+
+          mapfile -t missing_versions < <(printf '%s\n' "${MISSING_VERSIONS}" | sed '/^$/d')
+
+          built_versions=()
+          failed_versions=()
+
+          for version in "${missing_versions[@]}"; do
+            image_tag="${DOCKERHUB_NAMESPACE}/${DOCKERHUB_REPOSITORY}:${version}"
+            base_image="nextcloud:${version}"
+            generated_dockerfile="/tmp/Dockerfile.${version}"
+
+            echo "Preparing build for ${image_tag} using base ${base_image}"
+
+            if ! docker pull "${base_image}"; then
+              echo "Skipping ${version}: upstream base image ${base_image} was not found"
+              failed_versions+=("${version}")
+              continue
+            fi
+
+            awk -v replacement="FROM ${base_image}" '
+              BEGIN { replaced = 0 }
+              {
+                if (!replaced && $1 == "FROM") {
+                  print replacement
+                  replaced = 1
+                  next
+                }
+                print
+              }
+              END {
+                if (!replaced) {
+                  exit 1
+                }
+              }
+            ' Dockerfile > "${generated_dockerfile}"
+
+            if docker buildx build \
+              --pull \
+              --push \
+              --file "${generated_dockerfile}" \
+              --tag "${image_tag}" \
+              .; then
+              echo "Built and pushed ${image_tag}"
+              built_versions+=("${version}")
+            else
+              echo "Build failed for ${image_tag}"
+              failed_versions+=("${version}")
+            fi
+          done
+
+          {
+            echo "built_count=${#built_versions[@]}"
+            echo "failed_count=${#failed_versions[@]}"
+            echo "built_versions<<EOF"
+            printf '%s\n' "${built_versions[@]}"
+            echo "EOF"
+            echo "failed_versions<<EOF"
+            printf '%s\n' "${failed_versions[@]}"
+            echo "EOF"
+          } >> "${GITHUB_OUTPUT}"
+
       - name: Publish summary
         shell: bash
         run: |
@@ -147,12 +237,33 @@ jobs:
             echo "- Version line checked: ${{ steps.compare.outputs.major_minor }}.${{ inputs.start_patch }} through ${{ steps.compare.outputs.major_minor }}.${{ steps.compare.outputs.target_patch }}"
             echo "- Present strict numeric tags: ${{ steps.compare.outputs.present_count }}"
             echo "- Missing strict numeric tags: ${{ steps.compare.outputs.missing_count }}"
+            echo "- Build missing versions: ${{ inputs.build_and_push_missing }}"
+            if [ "${{ inputs.build_and_push_missing }}" = "true" ] && [ "${{ steps.compare.outputs.missing_count }}" != "0" ]; then
+              echo "- Built missing versions: ${{ steps.build_missing.outputs.built_count }}"
+              echo "- Failed builds: ${{ steps.build_missing.outputs.failed_count }}"
+            fi
             echo ""
             echo "### Missing Versions"
             if [ "${{ steps.compare.outputs.missing_count }}" = "0" ]; then
               echo "None"
             else
               echo "${{ steps.compare.outputs.missing_versions }}"
+            fi
+            if [ "${{ inputs.build_and_push_missing }}" = "true" ] && [ "${{ steps.compare.outputs.missing_count }}" != "0" ]; then
+              echo ""
+              echo "### Built Versions"
+              if [ "${{ steps.build_missing.outputs.built_count }}" = "0" ]; then
+                echo "None"
+              else
+                echo "${{ steps.build_missing.outputs.built_versions }}"
+              fi
+              echo ""
+              echo "### Failed Version Builds"
+              if [ "${{ steps.build_missing.outputs.failed_count }}" = "0" ]; then
+                echo "None"
+              else
+                echo "${{ steps.build_missing.outputs.failed_versions }}"
+              fi
             fi
             echo ""
             echo "### Present Versions"
@@ -164,8 +275,15 @@ jobs:
           } >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Fail if missing versions were found
-        if: inputs.fail_on_missing == 'true' && steps.compare.outputs.missing_count != '0'
+        if: inputs.fail_on_missing == 'true' && steps.compare.outputs.missing_count != '0' && inputs.build_and_push_missing != 'true'
         run: |
           echo "Missing versions detected:" >&2
           echo "${{ steps.compare.outputs.missing_versions }}" >&2
+          exit 1
+
+      - name: Fail if any missing version build failed
+        if: inputs.build_and_push_missing == 'true' && steps.compare.outputs.missing_count != '0' && steps.build_missing.outputs.failed_count != '0'
+        run: |
+          echo "Some missing versions failed to build/push:" >&2
+          echo "${{ steps.build_missing.outputs.failed_versions }}" >&2
           exit 1
