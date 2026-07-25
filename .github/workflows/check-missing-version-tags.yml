@@ -117,7 +117,8 @@ jobs:
             while url:
               with urllib.request.urlopen(url, timeout=30) as response:
                 payload = json.load(response)
-              tags.extend(payload.get("results", []))
+              for item in payload.get("results", []):
+                tags.append(str(item.get("name", "")).strip())
               url = payload.get("next")
             return tags
 
@@ -137,8 +138,7 @@ jobs:
             major_filter = int(major_filter_raw)
 
           upstream_versions = set()
-          for item in fetch_tags("library", "nextcloud"):
-            name = str(item.get("name", "")).strip()
+          for name in fetch_tags("library", "nextcloud"):
             m = semver_re.fullmatch(name)
             if not m:
               continue
@@ -156,8 +156,7 @@ jobs:
             )
 
           mirror_versions = set()
-          for item in fetch_tags(namespace, repository):
-            name = str(item.get("name", "")).strip()
+          for name in fetch_tags(namespace, repository):
             m = semver_re.fullmatch(name)
             if not m:
               continue
