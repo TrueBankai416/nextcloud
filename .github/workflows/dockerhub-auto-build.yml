@@ -55,7 +55,15 @@ jobs:
           docker pull "${BASE_IMAGE}"
 
           base_digest="$(docker image inspect --format='{{ index .RepoDigests 0 }}' "${BASE_IMAGE}" | awk -F'@' '{print $2}')"
-          base_version="$(docker image inspect --format='{{ index .Config.Labels "org.opencontainers.image.version" }}' "${BASE_IMAGE}" || true)"
+          base_version="$(docker image inspect --format='{{range .Config.Env}}{{println .}}{{end}}' "${BASE_IMAGE}" | awk -F= '$1=="NEXTCLOUD_VERSION"{print $2; exit}')"
+
+          if [ -z "${base_version}" ] || [ "${base_version}" = "<no value>" ]; then
+            base_version="$(docker image inspect --format='{{ index .Config.Labels "org.opencontainers.image.version" }}' "${BASE_IMAGE}" || true)"
+          fi
+
+          if [ -z "${base_version}" ] || [ "${base_version}" = "<no value>" ]; then
+            base_version="$(docker image inspect --format='{{ index .Config.Labels "org.label-schema.version" }}' "${BASE_IMAGE}" || true)"
+          fi
 
           if [ -z "${base_version}" ] || [ "${base_version}" = "<no value>" ]; then
             base_version="$(date -u +%Y.%m.%d)"
