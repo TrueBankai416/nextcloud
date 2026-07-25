@@ -29,7 +29,7 @@ This is an enhanced Nextcloud Docker image with additional features for better p
 
 ### Basic Usage
 ```bash
-docker run -d \
+sudo docker run -d \
   --name nextcloud \
   -p 8080:80 \
   -p 7867:7867 \
@@ -48,25 +48,25 @@ cp .env.example .env
 # Edit .env file with your passwords and configuration
 
 # Start with basic services
-docker-compose up -d
+sudo docker compose up -d
 ```
 
 #### With Nginx Reverse Proxy
 ```bash
 # Start with Nginx for HTTPS and WebSocket handling
-docker-compose --profile with-nginx up -d
+sudo docker compose --profile with-nginx up -d
 ```
 
 #### With Collabora Online
 ```bash
 # Start with document editing support
-docker-compose --profile with-collabora up -d
+sudo docker compose --profile with-collabora up -d
 ```
 
 #### Full Setup with All Services
 ```bash
 # Start with all optional services
-docker-compose --profile with-nginx --profile with-collabora up -d
+sudo docker compose --profile with-nginx --profile with-collabora up -d
 ```
 
 **Services included:**
@@ -93,7 +93,7 @@ The included `docker-compose.yaml` provides a pre-configured Nginx reverse proxy
 
 ```bash
 # Start with Nginx reverse proxy
-docker-compose --profile with-nginx up -d
+sudo docker compose --profile with-nginx up -d
 ```
 
 The `nginx.conf` file includes:
@@ -154,13 +154,13 @@ cp .env.example .env
 ### 2. Start Services
 ```bash
 # Basic setup
-docker-compose up -d
+sudo docker compose up -d
 
 # Or with Nginx reverse proxy
-docker-compose --profile with-nginx up -d
+sudo docker compose --profile with-nginx up -d
 
 # Or with all services
-docker-compose --profile with-nginx --profile with-collabora up -d
+sudo docker compose --profile with-nginx --profile with-collabora up -d
 ```
 
 ### 3. Access Nextcloud
@@ -170,13 +170,13 @@ docker-compose --profile with-nginx --profile with-collabora up -d
 
 ### 4. Verify notify_push
 ```bash
-docker exec -u www-data nextcloud php occ notify_push:self-test
+sudo docker exec -u www-data nextcloud php occ notify_push:self-test
 ```
 
 ## Building the Image
 
 ```bash
-docker build -t your-registry/nextcloud:latest .
+sudo docker build -t your-registry/nextcloud:latest .
 ```
 
 ## Configuration Files
@@ -196,7 +196,7 @@ docker build -t your-registry/nextcloud:latest .
 ### Memory Issues
 If you encounter memory issues with large photo libraries:
 ```bash
-docker run -e PHP_MEMORY_LIMIT=2048M your-registry/nextcloud:latest
+sudo docker run -e PHP_MEMORY_LIMIT=2048M your-registry/nextcloud:latest
 ```
 
 ## Support
