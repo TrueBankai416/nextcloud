@@ -110,12 +110,10 @@ fi
 if [ "${INSTALL_RECOGNIZE:-false}" = "true" ]; then
     if install_app "recognize" "Recognize"; then
         configure_app "recognize" "
-            php occ config:app:set recognize enabled --value='yes'
+            php occ config:app:set recognize faces.enabled --value='true'
             php occ config:app:set recognize tensorflow.gpu --value='${NVIDIA_VISIBLE_DEVICES:+true}'
-            php occ config:app:set recognize faces_enabled --value='true'
-            php occ config:app:set recognize face_recognition_model --value='1'
-            php occ config:app:set recognize clustering_enabled --value='true'
-            php occ config:app:set recognize clustering_faces_threshold --value='0.4'
+            php occ recognize:download-models
+            php occ recognize:recrawl
             echo -e '${GREEN}✅ Recognize configured with face recognition enabled${NC}'
         "
     fi
