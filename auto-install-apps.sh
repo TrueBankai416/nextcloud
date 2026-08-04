@@ -119,6 +119,16 @@ if [ "${INSTALL_RECOGNIZE:-false}" = "true" ]; then
     fi
 fi
 
+# Install Face Recognition app (uses pdlib/dlib, already compiled into image)
+if [ "${INSTALL_FACERECOGNITION:-false}" = "true" ]; then
+    if install_app "facerecognition" "Face Recognition"; then
+        configure_app "facerecognition" "
+            php occ face:setup -m 1 -M 1G
+            echo -e '${GREEN}✅ Face Recognition configured with model 1 and 1GB memory${NC}'
+        "
+    fi
+fi
+
 # Install Preview Generator app (improves Memories performance)
 if [ "${INSTALL_MEMORIES:-false}" = "true" ] || [ "${INSTALL_PREVIEW_GENERATOR:-true}" = "true" ]; then
     if install_app "previewgenerator" "Preview Generator"; then
