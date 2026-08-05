@@ -60,8 +60,9 @@ RUN echo '45 2 * * * flock -n /tmp/nextcloud-recognize.lock /usr/local/bin/condi
 RUN echo '0 3 * * * flock -n /tmp/nextcloud-preview.lock /usr/local/bin/conditional-cron.sh preview' >> /var/spool/cron/crontabs/www-data
 RUN echo '30 3 * * * flock -n /tmp/nextcloud-previewgen.lock /usr/local/bin/conditional-cron.sh previewgenerator' >> /var/spool/cron/crontabs/www-data
 
-# Increase PHP memory limit for Nextcloud
-RUN echo memory_limit=1024M > /usr/local/etc/php/conf.d/memory-limit.ini
+# zz- prefix ensures this loads last and wins over any base image memory_limit
+RUN echo memory_limit=1024M > /usr/local/etc/php/conf.d/zz-memory-limit.ini \
+ && sed -i 's/memory_limit=.*/memory_limit=1024M/' /usr/local/etc/php/conf.d/nextcloud.ini || true
 
 # Enable proc_open function (required by Memories app and other Nextcloud apps)
 RUN echo 'disable_functions =' > /usr/local/etc/php/conf.d/enable-functions.ini

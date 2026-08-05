@@ -120,10 +120,13 @@ if [ "${INSTALL_RECOGNIZE:-false}" = "true" ]; then
 fi
 
 # Install Face Recognition app (uses pdlib/dlib, already compiled into image)
+# Note: recognize app must also be enabled as a dependency in NC34
 if [ "${INSTALL_FACERECOGNITION:-false}" = "true" ]; then
+    install_app "recognize" "Recognize (required by Face Recognition)"
     if install_app "facerecognition" "Face Recognition"; then
         configure_app "facerecognition" "
             php occ face:setup -m 1 -M 1G
+            php occ config:app:set facerecognition analysis_image_area --value='640000'
             echo -e '${GREEN}✅ Face Recognition configured with model 1 and 1GB memory${NC}'
         "
     fi
