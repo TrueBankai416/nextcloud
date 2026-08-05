@@ -79,6 +79,7 @@ services:
       - APACHE_DISABLE_REWRITE_IP=1
       - APACHE_DOCUMENT_ROOT=/var/www/html
       - APACHE_LOG_DIR=/var/log/apache2
+      - NEXTCLOUD_URL=http://localhost:80
     env_file:
       - .env
     depends_on:

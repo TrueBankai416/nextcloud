@@ -61,6 +61,7 @@ echo -e "${GREEN}✅ Nextcloud is ready${NC}"
 if [ "${INSTALL_NOTIFY_PUSH:-false}" = "true" ]; then
     if install_app "notify_push" "Notify Push"; then
         configure_app "notify_push" "
+            php occ config:system:set trusted_proxies 1 --value='127.0.0.1'
             php occ config:app:set notify_push base_endpoint --value='wss://${NEXTCLOUD_DOMAIN:-localhost}/push'
             php occ config:app:set notify_push binary_path --value='/usr/local/bin/notify_push'
             # Force update if already configured
