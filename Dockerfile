@@ -49,19 +49,20 @@ RUN git clone https://github.com/goodspb/pdlib.git /usr/src/php/ext/pdlib
 # Install the pdlib PHP extension
 RUN docker-php-ext-install pdlib
 
-# General background stuff – OK every 5 min
-RUN echo '*/5 * * * * flock -n /tmp/nextcloud-cron.lock php -f /var/www/html/cron.php' >> /var/spool/cron/crontabs/www-data
-RUN echo '*/10 * * * * flock -n /tmp/nextcloud-general.lock /usr/local/bin/conditional-cron.sh general' >> /var/spool/cron/crontabs/www-data
+# Full paths required: busybox crond runs with a minimal PATH (no /usr/local/bin, no /usr/bin)
+RUN mkdir -p /var/spool/cron/crontabs \
+ && echo '*/5 * * * * /usr/bin/flock -n /tmp/nextcloud-cron.lock /usr/local/bin/php -f /var/www/html/cron.php' > /var/spool/cron/crontabs/www-data \
+ && echo '15 2 * * * /usr/bin/flock -n /tmp/nextcloud-memories.lock /usr/local/bin/conditional-cron.sh memories' >> /var/spool/cron/crontabs/www-data \
+ && echo '30 2 * * * /usr/bin/flock -n /tmp/nextcloud-face.lock /usr/local/bin/conditional-cron.sh face' >> /var/spool/cron/crontabs/www-data \
+ && echo '45 2 * * * /usr/bin/flock -n /tmp/nextcloud-recognize.lock /usr/local/bin/conditional-cron.sh recognize' >> /var/spool/cron/crontabs/www-data \
+ && echo '0 3 * * * /usr/bin/flock -n /tmp/nextcloud-preview.lock /usr/local/bin/conditional-cron.sh preview' >> /var/spool/cron/crontabs/www-data \
+ && echo '30 3 * * * /usr/bin/flock -n /tmp/nextcloud-previewgen.lock /usr/local/bin/conditional-cron.sh previewgenerator' >> /var/spool/cron/crontabs/www-data \
+ && chown www-data:www-data /var/spool/cron/crontabs/www-data \
+ && chmod 600 /var/spool/cron/crontabs/www-data
 
-# Heavy stuff – once nightly or off-peak
-RUN echo '15 2 * * * flock -n /tmp/nextcloud-memories.lock /usr/local/bin/conditional-cron.sh memories' >> /var/spool/cron/crontabs/www-data
-RUN echo '30 2 * * * flock -n /tmp/nextcloud-face.lock /usr/local/bin/conditional-cron.sh face' >> /var/spool/cron/crontabs/www-data
-RUN echo '45 2 * * * flock -n /tmp/nextcloud-recognize.lock /usr/local/bin/conditional-cron.sh recognize' >> /var/spool/cron/crontabs/www-data
-RUN echo '0 3 * * * flock -n /tmp/nextcloud-preview.lock /usr/local/bin/conditional-cron.sh preview' >> /var/spool/cron/crontabs/www-data
-RUN echo '30 3 * * * flock -n /tmp/nextcloud-previewgen.lock /usr/local/bin/conditional-cron.sh previewgenerator' >> /var/spool/cron/crontabs/www-data
-
-# Increase PHP memory limit for Nextcloud
-RUN echo memory_limit=1024M > /usr/local/etc/php/conf.d/memory-limit.ini
+# zz- prefix ensures this loads last and wins over any base image memory_limit
+RUN echo memory_limit=1024M > /usr/local/etc/php/conf.d/zz-memory-limit.ini \
+ && sed -i 's/memory_limit=.*/memory_limit=1024M/' /usr/local/etc/php/conf.d/nextcloud.ini || true
 
 # Enable proc_open function (required by Memories app and other Nextcloud apps)
 RUN echo 'disable_functions =' > /usr/local/etc/php/conf.d/enable-functions.ini

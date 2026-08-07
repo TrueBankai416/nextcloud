@@ -61,6 +61,7 @@ echo -e "${GREEN}✅ Nextcloud is ready${NC}"
 if [ "${INSTALL_NOTIFY_PUSH:-false}" = "true" ]; then
     if install_app "notify_push" "Notify Push"; then
         configure_app "notify_push" "
+            php occ config:system:set trusted_proxies 1 --value='127.0.0.1'
             php occ config:app:set notify_push base_endpoint --value='wss://${NEXTCLOUD_DOMAIN:-localhost}/push'
             php occ config:app:set notify_push binary_path --value='/usr/local/bin/notify_push'
             # Force update if already configured
@@ -115,6 +116,19 @@ if [ "${INSTALL_RECOGNIZE:-false}" = "true" ]; then
             php occ recognize:download-models
             php occ recognize:recrawl
             echo -e '${GREEN}✅ Recognize configured with face recognition enabled${NC}'
+        "
+    fi
+fi
+
+# Install Face Recognition app (uses pdlib/dlib, already compiled into image)
+# Note: recognize app must also be enabled as a dependency in NC34
+if [ "${INSTALL_FACERECOGNITION:-false}" = "true" ]; then
+    install_app "recognize" "Recognize (required by Face Recognition)"
+    if install_app "facerecognition" "Face Recognition"; then
+        configure_app "facerecognition" "
+            php occ face:setup -m 1 -M 1G
+            php occ config:app:set facerecognition analysis_image_area --value='640000'
+            echo -e '${GREEN}✅ Face Recognition configured with model 1 and 1GB memory${NC}'
         "
     fi
 fi

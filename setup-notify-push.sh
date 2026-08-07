@@ -18,6 +18,7 @@ php /var/www/html/occ app:enable notify_push
 
 # Configure notify_push
 echo "Configuring notify_push..."
+php /var/www/html/occ config:system:set trusted_proxies 1 --value="127.0.0.1"
 php /var/www/html/occ config:app:set notify_push base_endpoint --value="ws://localhost:7867"
 
 # Set up the binary path
