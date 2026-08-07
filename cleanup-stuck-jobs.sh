@@ -71,11 +71,9 @@ run_db_command() {
     fi
 }
 
-# Auto-detect container names by matching on container name (not image name)
-NC_CONTAINER=$(docker ps --format '{{.Names}}' | grep -E '^nextcloud$' | head -1)
-NC_CONTAINER=${NC_CONTAINER:-$(docker ps --format '{{.Names}}' | grep 'nextcloud' | grep -v 'cron\|installer\|nginx\|backup' | head -1)}
-MARIADB_CONTAINER=$(docker ps --format '{{.Names}}' | grep -E '^mariadb$' | head -1)
-MARIADB_CONTAINER=${MARIADB_CONTAINER:-$(docker ps --filter ancestor=mariadb --format '{{.Names}}' | head -1)}
+# --filter name= does substring match, so this handles prefixed names like d9b5d2_mariadb
+NC_CONTAINER=$(docker ps --filter "name=nextcloud" --format '{{.Names}}' | grep -v 'cron\|installer\|nginx\|backup' | head -1)
+MARIADB_CONTAINER=$(docker ps --filter "name=mariadb" --format '{{.Names}}' | head -1)
 
 # Check if containers are running
 if [ -z "$NC_CONTAINER" ]; then
