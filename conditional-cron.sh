@@ -1,24 +1,20 @@
 #!/bin/bash
 
-# Conditional Nextcloud cron script
-# Only runs commands for installed and enabled apps
+PHP=/usr/local/bin/php
 
-# Colors for logging
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
-# Function to check if app is installed and enabled
 is_app_enabled() {
     local app_name=$1
-    php /var/www/html/occ app:list --output=json 2>/dev/null | jq -r '.enabled | keys[]' 2>/dev/null | grep -q "^$app_name$"
+    $PHP /var/www/html/occ app:list --output=json 2>/dev/null | jq -r '.enabled | keys[]' 2>/dev/null | grep -q "^$app_name$"
 }
 
-# Function to check if occ command exists
 command_exists() {
     local command=$1
-    php /var/www/html/occ list --format=json 2>/dev/null | jq -r '.commands[].name' 2>/dev/null | grep -q "^$command$"
+    $PHP /var/www/html/occ list --format=json 2>/dev/null | jq -r '.commands[].name' 2>/dev/null | grep -q "^$command$"
 }
 
 # Function to run conditional cron job
@@ -43,16 +39,15 @@ run_conditional_job() {
     
     # Run the job
     echo -e "${GREEN}[$(date)] Running $job_name...${NC}"
-    if php /var/www/html/occ "$command" 2>&1; then
+    if $PHP /var/www/html/occ "$command" 2>&1; then
         echo -e "${GREEN}[$(date)] $job_name completed successfully${NC}"
     else
         echo -e "${RED}[$(date)] $job_name failed${NC}"
     fi
 }
 
-# Wait for Nextcloud to be ready
 echo -e "${YELLOW}[$(date)] Waiting for Nextcloud to be ready...${NC}"
-until php /var/www/html/occ status --output=json 2>/dev/null | jq -r '.installed' 2>/dev/null | grep -q "true"; do
+until $PHP /var/www/html/occ status --output=json 2>/dev/null | jq -r '.installed' 2>/dev/null | grep -q "true"; do
     sleep 10
 done
 echo -e "${GREEN}[$(date)] Nextcloud is ready${NC}"
@@ -80,9 +75,8 @@ case "$1" in
         run_conditional_job "previewgenerator" "preview:generate-all" "Preview Generator"
         ;;
     "general")
-        # General Nextcloud cron
         echo -e "${GREEN}[$(date)] Running general Nextcloud cron...${NC}"
-        php -f /var/www/html/cron.php
+        $PHP -f /var/www/html/cron.php
         ;;
     *)
         echo -e "${RED}[$(date)] Unknown cron job: $1${NC}"

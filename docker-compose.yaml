@@ -79,7 +79,7 @@ services:
       - APACHE_DISABLE_REWRITE_IP=1
       - APACHE_DOCUMENT_ROOT=/var/www/html
       - APACHE_LOG_DIR=/var/log/apache2
-      - NEXTCLOUD_URL=http://localhost:80
+      - NEXTCLOUD_URL=${NEXTCLOUD_URL:-https://cloud.lunekes.com}
     env_file:
       - .env
     depends_on:
@@ -175,6 +175,12 @@ services:
     entrypoint: /cron.sh
     env_file:
       - .env
+    healthcheck:
+      test: ["CMD-SHELL", "grep -q crond /proc/1/cmdline"]
+      interval: 1m
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     deploy:
       resources:
         limits:
