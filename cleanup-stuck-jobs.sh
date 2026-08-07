@@ -50,7 +50,7 @@ fi
 
 # Function to run commands in the nextcloud container
 run_in_container() {
-    docker exec -u www-data nextcloud "$@"
+    docker exec -u www-data "$NC_CONTAINER" "$@"
 }
 
 # Function to run database commands
@@ -59,28 +59,36 @@ run_db_command() {
         echo "Error: MYSQL_PASSWORD not found in .env file"
         exit 1
     fi
-    
+
     # Try mysql first (for older MariaDB versions), then mariadb (for newer versions)
-    if docker exec -i mariadb mysql -u "${MYSQL_USER:-nextcloud}" -p"${MYSQL_PASSWORD}" "${MYSQL_DATABASE:-nextcloud}" -h "${MYSQL_HOST:-mariadb}" -e "$1" 2>/dev/null; then
+    if docker exec -i "$MARIADB_CONTAINER" mysql -u "${MYSQL_USER:-nextcloud}" -p"${MYSQL_PASSWORD}" "${MYSQL_DATABASE:-nextcloud}" -h "${MYSQL_HOST:-mariadb}" -e "$1" 2>/dev/null; then
         return 0
-    elif docker exec -i mariadb mariadb -u "${MYSQL_USER:-nextcloud}" -p"${MYSQL_PASSWORD}" "${MYSQL_DATABASE:-nextcloud}" -h "${MYSQL_HOST:-mariadb}" -e "$1" 2>/dev/null; then
+    elif docker exec -i "$MARIADB_CONTAINER" mariadb -u "${MYSQL_USER:-nextcloud}" -p"${MYSQL_PASSWORD}" "${MYSQL_DATABASE:-nextcloud}" -h "${MYSQL_HOST:-mariadb}" -e "$1" 2>/dev/null; then
         return 0
     else
-        echo "Error: Failed to connect to MariaDB using both 'mysql' and 'mariadb' commands"
+        echo "Error: Failed to connect to MariaDB container '$MARIADB_CONTAINER'"
         return 1
     fi
 }
 
+# Auto-detect container names by matching on container name (not image name)
+NC_CONTAINER=$(docker ps --format '{{.Names}}' | grep -E '^nextcloud$' | head -1)
+NC_CONTAINER=${NC_CONTAINER:-$(docker ps --format '{{.Names}}' | grep 'nextcloud' | grep -v 'cron\|installer\|nginx\|backup' | head -1)}
+MARIADB_CONTAINER=$(docker ps --format '{{.Names}}' | grep -E '^mariadb$' | head -1)
+MARIADB_CONTAINER=${MARIADB_CONTAINER:-$(docker ps --filter ancestor=mariadb --format '{{.Names}}' | head -1)}
+
 # Check if containers are running
-if ! docker ps | grep -q "nextcloud"; then
+if [ -z "$NC_CONTAINER" ]; then
     echo "Error: Nextcloud container is not running!"
     exit 1
 fi
 
-if ! docker ps | grep -q "mariadb"; then
+if [ -z "$MARIADB_CONTAINER" ]; then
     echo "Error: MariaDB container is not running!"
     exit 1
 fi
+
+echo "Using containers: nextcloud=$NC_CONTAINER, mariadb=$MARIADB_CONTAINER"
 
 echo "Checking current background jobs status (showing up to $LIMIT jobs)..."
 # Try different command variations as they vary between Nextcloud versions
