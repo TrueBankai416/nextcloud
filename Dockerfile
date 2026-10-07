@@ -44,7 +44,9 @@ RUN git clone https://github.com/davisking/dlib.git \
  && make install
 
 # Clone and install pdlib, a PHP extension for dlib
-RUN git clone https://github.com/goodspb/pdlib.git /usr/src/php/ext/pdlib
+# dlib now requires C++17 (master), but pdlib's config.m4 hardcodes C++14, so patch it to match
+RUN git clone https://github.com/goodspb/pdlib.git /usr/src/php/ext/pdlib \
+ && sed -i 's/-std=c++14/-std=c++17/' /usr/src/php/ext/pdlib/config.m4
 
 # Install the pdlib PHP extension
 RUN docker-php-ext-install pdlib
