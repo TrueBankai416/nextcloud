@@ -443,7 +443,7 @@ jobs:
           # Fail loudly if upstream republished the tag while we were building;
           # the stored label then no longer matches, so the next nightly run
           # detects the tag as stale and rebuilds it against the newer base.
-          current_digest="$(docker buildx imagetools inspect "${base_image}" | awk '/^Digest:/ { print $2; exit }')"
+          current_digest="$(docker buildx imagetools inspect "${base_image}" | awk '/^Digest:/ && !found { print $2; found=1 }')"
           if [ "${current_digest}" != "${base_digest}" ]; then
             echo "Upstream ${base_image} changed during the build (${base_digest} -> ${current_digest}); the next nightly run will rebuild it." >&2
             exit 1
