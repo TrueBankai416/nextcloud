@@ -106,6 +106,7 @@ jobs:
           import os
           import re
           import subprocess
+          import time
           import urllib.request
 
           namespace = os.environ["DOCKERHUB_NAMESPACE"].strip()
@@ -133,15 +134,99 @@ jobs:
                   url = payload.get("next")
               return tags
 
-          def imagetools_field(image_ref, go_format):
+          def run_imagetools(image_ref, go_format, max_attempts=3):
+              """Run `docker buildx imagetools inspect` for image_ref.
+
+              Returns (stdout, not_found). not_found is True only when the
+              registry confirms the manifest genuinely does not exist. Any
+              other failure (rate limiting, auth, network, timeout) is
+              retried with backoff and, if it never succeeds, raises
+              RuntimeError so the caller fails loudly instead of silently
+              treating an unreachable tag as "up to date" or "missing".
+              """
+              last_err = None
+              for attempt in range(1, max_attempts + 1):
+                  try:
+                      out = subprocess.run(
+                          ["docker", "buildx", "imagetools", "inspect", image_ref, "--format", go_format],
+                          capture_output=True, text=True, timeout=30, check=True,
+                      )
+                      return out.stdout.strip(), False
+                  except subprocess.CalledProcessError as exc:
+                      stderr = (exc.stderr or "").strip()
+                      if "not found" in stderr.lower():
+                          return None, True
+                      last_err = stderr or str(exc)
+                      if attempt < max_attempts:
+                          time.sleep(5 * attempt)
+              raise RuntimeError(f"Failed to inspect {image_ref} after {max_attempts} attempts: {last_err}")
+
+          def get_own_base_digest_label(image_tag):
+              """Best-effort lookup of our previously stored
+              org.opencontainers.image.base.digest label for image_tag.
+
+              Returns None on any failure (including transient ones): that
+              safely falls through to "treat as stale and rebuild", which is
+              the safe default direction for our own tag (a redundant
+              rebuild, never a missed upstream security patch).
+              """
               try:
-                  out = subprocess.run(
-                      ["docker", "buildx", "imagetools", "inspect", image_ref, "--format", go_format],
-                      capture_output=True, text=True, timeout=30, check=True,
-                  )
-                  return out.stdout.strip()
-              except subprocess.CalledProcessError:
+                  raw_stdout, not_found = run_imagetools(image_tag, "{{json .}}", max_attempts=2)
+              except RuntimeError:
                   return None
+              if not_found or not raw_stdout:
+                  return None
+              try:
+                  data = json.loads(raw_stdout)
+              except json.JSONDecodeError:
+                  return None
+
+              def labels_from_image(image):
+                  return (image or {}).get("config", {}).get("Labels", {}).get(
+                      "org.opencontainers.image.base.digest"
+                  )
+
+              manifest = data.get("manifest", {}) or {}
+              if "image.manifest" in manifest.get("mediaType", ""):
+                  # Tag resolves directly to a single-platform manifest; the
+                  # top-level "image" field already has the flat config.
+                  return labels_from_image(data.get("image"))
+
+              # Tag resolves to an index (buildx attaches a provenance
+              # attestation manifest alongside the real platform manifest even
+              # for single-architecture builds), so .Image is not a flat
+              # config here. Find the linux/amd64 manifest that is not the
+              # attestation, and inspect it directly by digest, which always
+              # returns an unambiguous flat image config.
+              child_digest = None
+              for child in manifest.get("manifests", []):
+                  platform = child.get("platform", {}) or {}
+                  if platform.get("architecture") != "amd64" or platform.get("os") != "linux":
+                      continue
+                  annotations = child.get("annotations", {}) or {}
+                  if annotations.get("vnd.docker.reference.type") == "attestation-manifest":
+                      continue
+                  child_digest = child.get("digest")
+                  break
+
+              if not child_digest:
+                  return None
+
+              repo_ref = image_tag.split(":")[0]
+              try:
+                  child_stdout, child_not_found = run_imagetools(
+                      f"{repo_ref}@{child_digest}", "{{json .}}", max_attempts=2
+                  )
+              except RuntimeError:
+                  return None
+              if child_not_found or not child_stdout:
+                  return None
+              try:
+                  child_data = json.loads(child_stdout)
+              except json.JSONDecodeError:
+                  return None
+
+              return labels_from_image(child_data.get("image"))
 
           start = parse(from_version)
           end = parse(to_version)
@@ -171,15 +256,16 @@ jobs:
               base_image = f"nextcloud:{version}"
               image_tag = f"{namespace}/{repository}:{version}"
 
-              upstream_digest = imagetools_field(base_image, "{{.Manifest.Digest}}")
-              if not upstream_digest:
+              # Any failure other than a confirmed "not found" propagates as a
+              # RuntimeError here and fails the whole step, rather than being
+              # swallowed and silently reported as nothing-to-rebuild.
+              upstream_digest, upstream_not_found = run_imagetools(base_image, "{{.Manifest.Digest}}")
+              if upstream_not_found:
                   print(f"{version}: upstream {base_image} not found, skipping")
                   not_found.append(version)
                   continue
 
-              previous_digest = imagetools_field(
-                  image_tag, '{{index .Image.Config.Labels "org.opencontainers.image.base.digest"}}'
-              )
+              previous_digest = get_own_base_digest_label(image_tag)
 
               if not previous_digest or previous_digest != upstream_digest:
                   print(f"{version}: STALE (have={previous_digest!r} want={upstream_digest!r})")
@@ -211,7 +297,7 @@ jobs:
       matrix:
         version: ${{ fromJson(needs.detect-stale.outputs.versions) }}
     env:
-      IMAGE_NAME: ${{ env.DOCKERHUB_NAMESPACE }}/${{ env.DOCKERHUB_REPOSITORY }}
+      IMAGE_NAME: ${{ inputs.dockerhub_namespace || 'bankaitech' }}/${{ inputs.dockerhub_repository || 'nextcloud' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
