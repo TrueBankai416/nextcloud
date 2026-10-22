@@ -2,7 +2,7 @@ name: Build and Publish Nextcloud Image
 
 on:
   schedule:
-    - cron: "0 */6 * * *"
+    - cron: "0 * * * *"
   workflow_dispatch:
   push:
     paths:
@@ -137,3 +137,45 @@ jobs:
       - name: No changes detected
         if: steps.gate.outputs.should_build != 'true'
         run: echo "No upstream change detected. Image build skipped."
+
+      - name: Notify Discord of rebuild
+        if: steps.gate.outputs.should_build == 'true' && success()
+        shell: bash
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          VERSION_TAG: ${{ steps.upstream.outputs.version_tag }}
+          BASE_DIGEST: ${{ steps.upstream.outputs.base_digest }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${DISCORD_WEBHOOK_URL:-}" ]; then
+            echo "DISCORD_WEBHOOK_URL secret not set, skipping notification."
+            exit 0
+          fi
+
+          payload="$(jq -n \
+            --arg content "✅ **${IMAGE_NAME}** rebuilt — upstream \`${BASE_IMAGE}\` changed (new digest \`${BASE_DIGEST}\`). Published tags: \`latest\`, \`${VERSION_TAG}\`. Run: ${RUN_URL}" \
+            '{content: $content}')"
+
+          curl -sf -H "Content-Type: application/json" -X POST -d "${payload}" "${DISCORD_WEBHOOK_URL}"
+
+      - name: Notify Discord of failure
+        if: failure()
+        shell: bash
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${DISCORD_WEBHOOK_URL:-}" ]; then
+            echo "DISCORD_WEBHOOK_URL secret not set, skipping notification."
+            exit 0
+          fi
+
+          payload="$(jq -n \
+            --arg content "❌ **${IMAGE_NAME}** auto-build workflow failed. Run: ${RUN_URL}" \
+            '{content: $content}')"
+
+          curl -sf -H "Content-Type: application/json" -X POST -d "${payload}" "${DISCORD_WEBHOOK_URL}"
