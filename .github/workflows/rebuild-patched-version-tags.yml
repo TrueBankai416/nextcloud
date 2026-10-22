@@ -53,9 +53,13 @@ concurrency:
   # Only keeps overlapping runs of this workflow from racing each other.
   # No group is shared with dockerhub-auto-build.yml (GitHub keeps one pending
   # run per group, so sharing would let the hourly run replace this nightly
-  # one). Instead the two workflows never write the same tag: the hourly one
-  # owns :latest and the current production version tag, and this workflow
-  # skips that version.
+  # one). Instead the two workflows avoid writing the same tag: the hourly one
+  # owns :latest and the current production version tag of bankaitech/nextcloud
+  # (the only destination it maintains), and this workflow skips that tag.
+  # Known limit: if a new Nextcloud release lands while an hourly run is still
+  # publishing the previous production version, both workflows can write that
+  # one older tag. A stale result is repaired by the next nightly run, because
+  # the stored base-digest label will no longer match upstream.
   group: rebuild-patched-version-tags
   cancel-in-progress: false
 
@@ -126,7 +130,13 @@ jobs:
           from_version = os.environ["FROM_VERSION"].strip()
           to_version = os.environ["TO_VERSION"].strip()
           major_filter_raw = os.environ["MAJOR_FILTER"].strip()
-          production_version = os.environ["PRODUCTION_VERSION"].strip()
+          # dockerhub-auto-build.yml only maintains bankaitech/nextcloud, so
+          # other destinations have no hourly publisher and nothing to skip.
+          production_version = (
+              os.environ["PRODUCTION_VERSION"].strip()
+              if (namespace, repository) == ("bankaitech", "nextcloud")
+              else ""
+          )
 
           semver_re = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
 
@@ -284,7 +294,7 @@ jobs:
                   continue
               if major_filter is not None and v[0] != major_filter:
                   continue
-              if name == production_version:
+              if production_version and name == production_version:
                   continue
               candidates.append((v, name))
 
@@ -325,7 +335,8 @@ jobs:
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
               f.write("## Stale Version Tag Check\n\n")
               f.write(f"- Range checked: {from_version} to {to_version}\n")
-              f.write(f"- Skipped (owned by dockerhub-auto-build.yml): {production_version}\n")
+              if production_version:
+                  f.write(f"- Skipped (owned by dockerhub-auto-build.yml): {production_version}\n")
               f.write(f"- Candidates considered: {len(names)}\n")
               f.write(f"- Stale (will rebuild): {', '.join(stale) if stale else 'none'}\n")
               f.write(f"- Up to date: {', '.join(unchanged) if unchanged else 'none'}\n")
