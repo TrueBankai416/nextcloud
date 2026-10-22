@@ -50,7 +50,13 @@ env:
   DOCKERHUB_REPOSITORY: ${{ inputs.dockerhub_repository || 'nextcloud' }}
 
 concurrency:
-  group: rebuild-patched-version-tags
+  # Shares dockerhub-auto-build.yml's group: both workflows publish version
+  # tags (and :latest) to the same Docker Hub repository. Without a shared
+  # group, this workflow could finish rebuilding a version tag from an
+  # older upstream digest after dockerhub-auto-build.yml already published
+  # that same tag from a newer, patched digest, silently reverting it. The
+  # shared group serializes the two publishers instead.
+  group: dockerhub-auto-build-publish
   cancel-in-progress: false
 
 jobs:
