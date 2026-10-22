@@ -44,19 +44,19 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 env:
   DOCKERHUB_NAMESPACE: ${{ inputs.dockerhub_namespace || 'bankaitech' }}
   DOCKERHUB_REPOSITORY: ${{ inputs.dockerhub_repository || 'nextcloud' }}
 
 concurrency:
-  # Shares dockerhub-auto-build.yml's group: both workflows publish version
-  # tags (and :latest) to the same Docker Hub repository. Without a shared
-  # group, this workflow could finish rebuilding a version tag from an
-  # older upstream digest after dockerhub-auto-build.yml already published
-  # that same tag from a newer, patched digest, silently reverting it. The
-  # shared group serializes the two publishers instead.
-  group: dockerhub-auto-build-publish
+  # Only keeps overlapping runs of this workflow from racing each other.
+  # Deliberately not shared with dockerhub-auto-build.yml: GitHub keeps at
+  # most one pending run per group, so a shared group lets that hourly
+  # workflow silently replace this nightly check while it is queued.
+  # Serialization against the hourly publisher is handled in the rebuild job.
+  group: rebuild-patched-version-tags
   cancel-in-progress: false
 
 jobs:
@@ -366,6 +366,33 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Wait for in-flight dockerhub-auto-build runs
+        if: inputs.dry_run != 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          # Both workflows publish version tags to the same repository. Wait
+          # for the hourly publisher to go idle so it cannot finish after this
+          # rebuild and be overwritten (or overwrite it) with a different base.
+          deadline=$((SECONDS + 3600))
+          while true; do
+            active="$(gh run list --workflow dockerhub-auto-build.yml --limit 20 \
+              --json status --jq '[.[] | select(.status != "completed")] | length')"
+            if [ "${active}" = "0" ]; then
+              break
+            fi
+            if [ "${SECONDS}" -ge "${deadline}" ]; then
+              echo "Timed out waiting for dockerhub-auto-build.yml to finish; the next nightly run will retry." >&2
+              exit 1
+            fi
+            echo "dockerhub-auto-build.yml has ${active} active run(s); waiting..."
+            sleep 30
+          done
+
       - name: Rebuild ${{ matrix.version }} against refreshed upstream base
         id: rebuild
         shell: bash
@@ -413,6 +440,15 @@ jobs:
             --label "org.opencontainers.image.base.name=${base_image}" \
             --label "org.opencontainers.image.base.digest=${base_digest}" \
             .
+
+          # Fail loudly if upstream republished the tag while we were building;
+          # the stored label then no longer matches, so the next nightly run
+          # detects the tag as stale and rebuilds it against the newer base.
+          current_digest="$(docker buildx imagetools inspect "${base_image}" --format '{{.Manifest.Digest}}')"
+          if [ "${current_digest}" != "${base_digest}" ]; then
+            echo "Upstream ${base_image} changed during the build (${base_digest} -> ${current_digest}); the next nightly run will rebuild it." >&2
+            exit 1
+          fi
 
           echo "rebuilt=true" >> "${GITHUB_OUTPUT}"
           echo "base_digest=${base_digest}" >> "${GITHUB_OUTPUT}"
