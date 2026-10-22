@@ -179,6 +179,28 @@ sudo docker exec -u www-data nextcloud php occ notify_push:self-test
 sudo docker build -t your-registry/nextcloud:latest .
 ```
 
+## CI/CD Workflows
+
+This repository publishes `bankaitech/nextcloud` to Docker Hub using several GitHub Actions workflows under [.github/workflows](.github/workflows). Together they keep published images in sync with both this repo's own changes and upstream Nextcloud/PHP security patches, without manual rebuilds.
+
+### [Push Latest on Main](.github/workflows/push-latest-on-main.yml)
+- **Trigger:** Push to `main` that touches the Dockerfile, entrypoint/cron scripts, or `supervisord.conf`.
+- **Purpose:** Rebuilds and publishes `bankaitech/nextcloud:latest` immediately whenever this repo's own build changes — so fixes to the Dockerfile or scripts go live right away, independent of any upstream Nextcloud release.
+
+### [Build and Publish Nextcloud Image](.github/workflows/dockerhub-auto-build.yml)
+- **Trigger:** Hourly schedule, manual dispatch, or push to CI-relevant files.
+- **Purpose:** Tracks the upstream `nextcloud:production` base image. Each run pulls it, compares its digest to the digest recorded on the last published `bankaitech/nextcloud:latest` image, and only rebuilds (publishing both `:latest` and the matching version tag, e.g. `34.0.5`) if upstream has actually changed — which also happens whenever upstream re-publishes `production` with a security fix, such as a PHP CVE patch. Skips the build when nothing changed, to avoid wasted CI time. Posts a Discord notification (via an optional `DISCORD_WEBHOOK_URL` repository secret) when a rebuild happens or the workflow fails, so patches don't go unnoticed.
+
+### [Check Missing Nextcloud Version Tags](.github/workflows/check-missing-version-tags.yml)
+- **Trigger:** Manual dispatch only.
+- **Purpose:** Compares the strict numeric Nextcloud versions published upstream (e.g. `32.0.7`, `33.0.4`) against the version tags already published under `bankaitech/nextcloud` within a configurable range, and reports — or optionally builds and pushes — any that are missing. Useful for backfilling version tags you don't have yet; it does not revisit tags that already exist.
+
+### [Rebuild Patched Nextcloud Version Tags](.github/workflows/rebuild-patched-version-tags.yml)
+- **Trigger:** Nightly schedule, or manual dispatch with a `dry_run` preview mode.
+- **Purpose:** Closes the gap the other workflows leave: once a specific version tag (e.g. `bankaitech/nextcloud:32.0.9`) has been published, nothing else revisits it — even if upstream later re-publishes `nextcloud:32.0.9` with a security fix. This workflow checks every existing version tag in a configurable range against its upstream counterpart (using lightweight manifest/config inspection instead of full image pulls, to stay fast and avoid Docker Hub rate limits) and rebuilds, re-labels, and re-pushes any that have fallen behind. Notifies Discord per rebuilt or failed tag.
+
+> **Setup note:** The Discord notifications used by the last two workflows require a `DISCORD_WEBHOOK_URL` repository secret pointing at a Discord channel webhook (Settings → Secrets and variables → Actions). Builds and rebuilds still run normally without it — notifications are simply skipped.
+
 ## Configuration Files
 
 - **docker-compose.yaml**: Complete multi-service setup
