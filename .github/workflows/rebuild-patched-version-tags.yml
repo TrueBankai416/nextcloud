@@ -159,6 +159,13 @@ jobs:
                       last_err = stderr or str(exc)
                       if attempt < max_attempts:
                           time.sleep(5 * attempt)
+                  except subprocess.TimeoutExpired as exc:
+                      # A timeout has no exit status to inspect for "not found",
+                      # so it is always treated as retryable, never as a
+                      # confirmed-missing manifest.
+                      last_err = f"timed out after {exc.timeout}s"
+                      if attempt < max_attempts:
+                          time.sleep(5 * attempt)
               raise RuntimeError(f"Failed to inspect {image_ref} after {max_attempts} attempts: {last_err}")
 
           def get_own_base_digest_label(image_tag):
