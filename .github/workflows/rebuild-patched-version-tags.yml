@@ -1,0 +1,491 @@
+name: Rebuild Patched Nextcloud Version Tags
+
+# Nightly companion to dockerhub-auto-build.yml. That workflow only tracks the
+# "production" track (latest stable), so published version tags for older
+# Nextcloud releases (e.g. 32.0.9, 33.0.4) are never revisited once built, even
+# when upstream re-publishes that exact nextcloud:<version> tag with a security
+# fix (such as a PHP CVE patch). This workflow checks every already-published
+# bankaitech/nextcloud version tag against its matching upstream nextcloud:<version>
+# tag and rebuilds any that have fallen behind.
+
+on:
+  schedule:
+    - cron: "30 3 * * *"
+  workflow_dispatch:
+    inputs:
+      dockerhub_namespace:
+        description: Docker Hub namespace/user
+        required: true
+        default: bankaitech
+      dockerhub_repository:
+        description: Docker Hub repository name
+        required: true
+        default: nextcloud
+      from_version:
+        description: First strict version to consider (inclusive), for example 32.0.7
+        required: true
+        default: "32.0.7"
+      to_version:
+        description: Last strict version to consider (inclusive). Use auto to use nextcloud:production NEXTCLOUD_VERSION
+        required: true
+        default: auto
+      major_filter:
+        description: Optional major to limit checks to (for example 32). Leave empty to include all majors in range
+        required: false
+        default: ""
+      dry_run:
+        description: Report which version tags are stale without rebuilding/pushing them
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+permissions:
+  contents: read
+
+env:
+  DOCKERHUB_NAMESPACE: ${{ inputs.dockerhub_namespace || 'bankaitech' }}
+  DOCKERHUB_REPOSITORY: ${{ inputs.dockerhub_repository || 'nextcloud' }}
+
+concurrency:
+  # Only keeps overlapping runs of this workflow from racing each other.
+  # No group is shared with dockerhub-auto-build.yml (GitHub keeps one pending
+  # run per group, so sharing would let the hourly run replace this nightly
+  # one). Instead the two workflows avoid writing the same tag: the hourly one
+  # owns :latest and the current production version tag of bankaitech/nextcloud
+  # (the only destination it maintains), and this workflow skips that tag.
+  # Known limit: if a new Nextcloud release lands while an hourly run is still
+  # publishing the previous production version, both workflows can write that
+  # one older tag. A stale result is repaired by the next nightly run, because
+  # the stored base-digest label will no longer match upstream.
+  group: rebuild-patched-version-tags
+  cancel-in-progress: false
+
+jobs:
+  detect-stale:
+    runs-on: ubuntu-latest
+    outputs:
+      versions: ${{ steps.detect.outputs.versions }}
+      has_stale: ${{ steps.detect.outputs.has_stale }}
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Resolve production version and to_version
+        id: resolve
+        shell: bash
+        env:
+          TO_VERSION: ${{ inputs.to_version || 'auto' }}
+        run: |
+          set -euo pipefail
+
+          # The production version tag is published by dockerhub-auto-build.yml
+          # together with :latest, so it is excluded from this workflow.
+          docker pull nextcloud:production >/dev/null
+          production_version="$(docker image inspect --format='{{range .Config.Env}}{{println .}}{{end}}' nextcloud:production | awk '$0 ~ /^NEXTCLOUD_VERSION=/ && !found { sub(/^NEXTCLOUD_VERSION=/,""); print; found=1 }')"
+
+          if [ -z "${production_version}" ]; then
+            echo "Could not resolve nextcloud:production version" >&2
+            exit 1
+          fi
+
+          to_version="${TO_VERSION}"
+          if [ "${to_version}" = "auto" ]; then
+            to_version="${production_version}"
+          fi
+
+          echo "production_version=${production_version}" >> "${GITHUB_OUTPUT}"
+          echo "to_version=${to_version}" >> "${GITHUB_OUTPUT}"
+          echo "Resolved production_version: ${production_version}, to_version: ${to_version}"
+
+      - name: Find stale published version tags
+        id: detect
+        shell: bash
+        env:
+          FROM_VERSION: ${{ inputs.from_version || '32.0.7' }}
+          TO_VERSION: ${{ steps.resolve.outputs.to_version }}
+          PRODUCTION_VERSION: ${{ steps.resolve.outputs.production_version }}
+          MAJOR_FILTER: ${{ inputs.major_filter || '' }}
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+          import time
+          import urllib.request
+
+          namespace = os.environ["DOCKERHUB_NAMESPACE"].strip()
+          repository = os.environ["DOCKERHUB_REPOSITORY"].strip()
+          from_version = os.environ["FROM_VERSION"].strip()
+          to_version = os.environ["TO_VERSION"].strip()
+          major_filter_raw = os.environ["MAJOR_FILTER"].strip()
+          # dockerhub-auto-build.yml only maintains bankaitech/nextcloud, so
+          # other destinations have no hourly publisher and nothing to skip.
+          production_version = (
+              os.environ["PRODUCTION_VERSION"].strip()
+              if (namespace, repository) == ("bankaitech", "nextcloud")
+              else ""
+          )
+
+          semver_re = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
+
+          def parse(v):
+              m = semver_re.fullmatch(v)
+              if not m:
+                  raise SystemExit(f"Invalid version: {v}")
+              return tuple(map(int, m.groups()))
+
+          def fetch_tags(ns, repo):
+              tags = []
+              url = f"https://hub.docker.com/v2/repositories/{ns}/{repo}/tags?page_size=100"
+              while url:
+                  with urllib.request.urlopen(url, timeout=30) as r:
+                      payload = json.load(r)
+                  for item in payload.get("results", []):
+                      tags.append(str(item.get("name", "")).strip())
+                  url = payload.get("next")
+              return tags
+
+          def run_imagetools(image_ref, go_format=None, max_attempts=3):
+              """Run `docker buildx imagetools inspect` for image_ref.
+
+              With go_format=None the plain (unformatted) output is returned.
+
+              Returns (stdout, not_found). not_found is True only when the
+              registry confirms the manifest genuinely does not exist. Any
+              other failure (rate limiting, auth, network, timeout) is
+              retried with backoff and, if it never succeeds, raises
+              RuntimeError so the caller fails loudly instead of silently
+              treating an unreachable tag as "up to date" or "missing".
+              """
+              last_err = None
+              for attempt in range(1, max_attempts + 1):
+                  try:
+                      cmd = ["docker", "buildx", "imagetools", "inspect", image_ref]
+                      if go_format:
+                          cmd += ["--format", go_format]
+                      out = subprocess.run(
+                          cmd, capture_output=True, text=True, timeout=30, check=True,
+                      )
+                      return out.stdout.strip(), False
+                  except subprocess.CalledProcessError as exc:
+                      stderr = (exc.stderr or "").strip()
+                      if "not found" in stderr.lower():
+                          return None, True
+                      last_err = stderr or str(exc)
+                      if attempt < max_attempts:
+                          time.sleep(5 * attempt)
+                  except subprocess.TimeoutExpired as exc:
+                      # A timeout has no exit status to inspect for "not found",
+                      # so it is always treated as retryable, never as a
+                      # confirmed-missing manifest.
+                      last_err = f"timed out after {exc.timeout}s"
+                      if attempt < max_attempts:
+                          time.sleep(5 * attempt)
+              raise RuntimeError(f"Failed to inspect {image_ref} after {max_attempts} attempts: {last_err}")
+
+          def get_top_level_digest(image_ref):
+              """Return (digest, not_found) for image_ref.
+
+              Uses unformatted inspection and parses the top-level `Digest:`
+              header: a --format call makes buildx load every platform's child
+              manifests and configs first, which multiplies registry requests
+              and burns through Docker Hub's rate limit across many versions.
+              """
+              stdout, not_found = run_imagetools(image_ref)
+              if not_found:
+                  return None, True
+              match = re.search(r"^Digest:\s+(sha256:[0-9a-f]{64})\s*$", stdout or "", re.MULTILINE)
+              if not match:
+                  raise RuntimeError(f"Could not parse digest from inspection of {image_ref}")
+              return match.group(1), False
+
+          def get_own_base_digest_label(image_tag):
+              """Best-effort lookup of our previously stored
+              org.opencontainers.image.base.digest label for image_tag.
+
+              Returns None on any failure (including transient ones): that
+              safely falls through to "treat as stale and rebuild", which is
+              the safe default direction for our own tag (a redundant
+              rebuild, never a missed upstream security patch).
+              """
+              try:
+                  raw_stdout, not_found = run_imagetools(image_tag, "{{json .}}", max_attempts=2)
+              except RuntimeError:
+                  return None
+              if not_found or not raw_stdout:
+                  return None
+              try:
+                  data = json.loads(raw_stdout)
+              except json.JSONDecodeError:
+                  return None
+
+              def labels_from_image(image):
+                  return (image or {}).get("config", {}).get("Labels", {}).get(
+                      "org.opencontainers.image.base.digest"
+                  )
+
+              manifest = data.get("manifest", {}) or {}
+              media_type = manifest.get("mediaType", "")
+              if "image.manifest" in media_type or media_type.endswith("distribution.manifest.v2+json"):
+                  # Tag resolves directly to a single-platform OCI or Docker
+                  # schema-2 manifest; the
+                  # top-level "image" field already has the flat config.
+                  return labels_from_image(data.get("image"))
+
+              # Tag resolves to an index (buildx attaches a provenance
+              # attestation manifest alongside the real platform manifest even
+              # for single-architecture builds), so .Image is not a flat
+              # config here. Find the linux/amd64 manifest that is not the
+              # attestation, and inspect it directly by digest, which always
+              # returns an unambiguous flat image config.
+              child_digest = None
+              for child in manifest.get("manifests", []):
+                  platform = child.get("platform", {}) or {}
+                  if platform.get("architecture") != "amd64" or platform.get("os") != "linux":
+                      continue
+                  annotations = child.get("annotations", {}) or {}
+                  if annotations.get("vnd.docker.reference.type") == "attestation-manifest":
+                      continue
+                  child_digest = child.get("digest")
+                  break
+
+              if not child_digest:
+                  return None
+
+              repo_ref = image_tag.split(":")[0]
+              try:
+                  child_stdout, child_not_found = run_imagetools(
+                      f"{repo_ref}@{child_digest}", "{{json .}}", max_attempts=2
+                  )
+              except RuntimeError:
+                  return None
+              if child_not_found or not child_stdout:
+                  return None
+              try:
+                  child_data = json.loads(child_stdout)
+              except json.JSONDecodeError:
+                  return None
+
+              return labels_from_image(child_data.get("image"))
+
+          start = parse(from_version)
+          end = parse(to_version)
+          major_filter = int(major_filter_raw) if major_filter_raw else None
+
+          candidates = []
+          for name in fetch_tags(namespace, repository):
+              m = semver_re.fullmatch(name)
+              if not m:
+                  continue
+              v = tuple(map(int, m.groups()))
+              if not (start <= v <= end):
+                  continue
+              if major_filter is not None and v[0] != major_filter:
+                  continue
+              if production_version and name == production_version:
+                  continue
+              candidates.append((v, name))
+
+          candidates.sort()
+          names = [n for _, n in candidates]
+          print(f"Candidate published versions in range [{from_version}, {to_version}]: {names}")
+
+          stale = []
+          unchanged = []
+          not_found = []
+
+          for version in names:
+              base_image = f"nextcloud:{version}"
+              image_tag = f"{namespace}/{repository}:{version}"
+
+              # Any failure other than a confirmed "not found" propagates as a
+              # RuntimeError here and fails the whole step, rather than being
+              # swallowed and silently reported as nothing-to-rebuild.
+              upstream_digest, upstream_not_found = get_top_level_digest(base_image)
+              if upstream_not_found:
+                  print(f"{version}: upstream {base_image} not found, skipping")
+                  not_found.append(version)
+                  continue
+
+              previous_digest = get_own_base_digest_label(image_tag)
+
+              if not previous_digest or previous_digest != upstream_digest:
+                  print(f"{version}: STALE (have={previous_digest!r} want={upstream_digest!r})")
+                  stale.append(version)
+              else:
+                  print(f"{version}: up to date ({upstream_digest})")
+                  unchanged.append(version)
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
+              f.write("versions=" + json.dumps(stale) + "\n")
+              f.write("has_stale=" + ("true" if stale else "false") + "\n")
+
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
+              f.write("## Stale Version Tag Check\n\n")
+              f.write(f"- Range checked: {from_version} to {to_version}\n")
+              if production_version:
+                  f.write(f"- Skipped (owned by dockerhub-auto-build.yml): {production_version}\n")
+              f.write(f"- Candidates considered: {len(names)}\n")
+              f.write(f"- Stale (will rebuild): {', '.join(stale) if stale else 'none'}\n")
+              f.write(f"- Up to date: {', '.join(unchanged) if unchanged else 'none'}\n")
+              f.write(f"- Not found upstream: {', '.join(not_found) if not_found else 'none'}\n")
+          PY
+
+      - name: Notify Discord of detection failure
+        if: failure()
+        shell: bash
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${DISCORD_WEBHOOK_URL:-}" ]; then
+            echo "DISCORD_WEBHOOK_URL secret not set, skipping notification."
+            exit 0
+          fi
+
+          payload="$(jq -n \
+            --arg content "❌ **${DOCKERHUB_NAMESPACE}/${DOCKERHUB_REPOSITORY}** stale-tag detection failed, so no version tags were checked or rebuilt. Run: ${RUN_URL}" \
+            '{content: $content}')"
+
+          curl -sf -H "Content-Type: application/json" -X POST -d "${payload}" "${DISCORD_WEBHOOK_URL}"
+
+  rebuild-stale:
+    needs: detect-stale
+    if: needs.detect-stale.outputs.has_stale == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        version: ${{ fromJson(needs.detect-stale.outputs.versions) }}
+    env:
+      IMAGE_NAME: ${{ inputs.dockerhub_namespace || 'bankaitech' }}/${{ inputs.dockerhub_repository || 'nextcloud' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Rebuild ${{ matrix.version }} against refreshed upstream base
+        id: rebuild
+        shell: bash
+        env:
+          VERSION: ${{ matrix.version }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+        run: |
+          set -euo pipefail
+
+          base_image="nextcloud:${VERSION}"
+          image_tag="${IMAGE_NAME}:${VERSION}"
+
+          base_digest="$(docker buildx imagetools inspect "${base_image}" --format '{{.Manifest.Digest}}')"
+
+          generated_dockerfile="/tmp/Dockerfile.${VERSION}"
+          # Pin to the inspected digest so the built base matches the recorded label.
+          awk -v replacement="FROM ${base_image}@${base_digest}" '
+            BEGIN { replaced = 0 }
+            {
+              if (!replaced && $1 == "FROM") {
+                print replacement
+                replaced = 1
+                next
+              }
+              print
+            }
+            END {
+              if (!replaced) exit 1
+            }
+          ' Dockerfile > "${generated_dockerfile}"
+
+          if [ "${DRY_RUN}" = "true" ]; then
+            echo "Dry run: would rebuild ${image_tag} from ${base_image}@${base_digest}"
+            echo "rebuilt=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          echo "Rebuilding ${image_tag} from ${base_image}@${base_digest}"
+
+          docker buildx build \
+            --pull \
+            --push \
+            --file "${generated_dockerfile}" \
+            --tag "${image_tag}" \
+            --label "org.opencontainers.image.base.name=${base_image}" \
+            --label "org.opencontainers.image.base.digest=${base_digest}" \
+            .
+
+          # Fail loudly if upstream republished the tag while we were building;
+          # the stored label then no longer matches, so the next nightly run
+          # detects the tag as stale and rebuilds it against the newer base.
+          current_digest="$(docker buildx imagetools inspect "${base_image}" --format '{{.Manifest.Digest}}')"
+          if [ "${current_digest}" != "${base_digest}" ]; then
+            echo "Upstream ${base_image} changed during the build (${base_digest} -> ${current_digest}); the next nightly run will rebuild it." >&2
+            exit 1
+          fi
+
+          echo "rebuilt=true" >> "${GITHUB_OUTPUT}"
+          echo "base_digest=${base_digest}" >> "${GITHUB_OUTPUT}"
+
+      - name: Notify Discord of rebuild
+        if: steps.rebuild.outputs.rebuilt == 'true' && success()
+        shell: bash
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          VERSION: ${{ matrix.version }}
+          BASE_DIGEST: ${{ steps.rebuild.outputs.base_digest }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${DISCORD_WEBHOOK_URL:-}" ]; then
+            echo "DISCORD_WEBHOOK_URL secret not set, skipping notification."
+            exit 0
+          fi
+
+          payload="$(jq -n \
+            --arg content "✅ **${IMAGE_NAME}:${VERSION}** rebuilt — upstream \`nextcloud:${VERSION}\` changed (new digest \`${BASE_DIGEST}\`). Run: ${RUN_URL}" \
+            '{content: $content}')"
+
+          curl -sf -H "Content-Type: application/json" -X POST -d "${payload}" "${DISCORD_WEBHOOK_URL}"
+
+      - name: Notify Discord of failure
+        if: failure()
+        shell: bash
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          VERSION: ${{ matrix.version }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${DISCORD_WEBHOOK_URL:-}" ]; then
+            echo "DISCORD_WEBHOOK_URL secret not set, skipping notification."
+            exit 0
+          fi
+
+          payload="$(jq -n \
+            --arg content "❌ **${IMAGE_NAME}:${VERSION}** rebuild failed. Run: ${RUN_URL}" \
+            '{content: $content}')"
+
+          curl -sf -H "Content-Type: application/json" -X POST -d "${payload}" "${DISCORD_WEBHOOK_URL}"
