@@ -1,0 +1,319 @@
+name: Rebuild Patched Nextcloud Version Tags
+
+# Nightly companion to dockerhub-auto-build.yml. That workflow only tracks the
+# "production" track (latest stable), so published version tags for older
+# Nextcloud releases (e.g. 32.0.9, 33.0.4) are never revisited once built, even
+# when upstream re-publishes that exact nextcloud:<version> tag with a security
+# fix (such as a PHP CVE patch). This workflow checks every already-published
+# bankaitech/nextcloud version tag against its matching upstream nextcloud:<version>
+# tag and rebuilds any that have fallen behind.
+
+on:
+  schedule:
+    - cron: "30 3 * * *"
+  workflow_dispatch:
+    inputs:
+      dockerhub_namespace:
+        description: Docker Hub namespace/user
+        required: true
+        default: bankaitech
+      dockerhub_repository:
+        description: Docker Hub repository name
+        required: true
+        default: nextcloud
+      from_version:
+        description: First strict version to consider (inclusive), for example 32.0.7
+        required: true
+        default: "32.0.7"
+      to_version:
+        description: Last strict version to consider (inclusive). Use auto to use nextcloud:production NEXTCLOUD_VERSION
+        required: true
+        default: auto
+      major_filter:
+        description: Optional major to limit checks to (for example 32). Leave empty to include all majors in range
+        required: false
+        default: ""
+      dry_run:
+        description: Report which version tags are stale without rebuilding/pushing them
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+permissions:
+  contents: read
+
+env:
+  DOCKERHUB_NAMESPACE: ${{ inputs.dockerhub_namespace || 'bankaitech' }}
+  DOCKERHUB_REPOSITORY: ${{ inputs.dockerhub_repository || 'nextcloud' }}
+
+concurrency:
+  group: rebuild-patched-version-tags
+  cancel-in-progress: false
+
+jobs:
+  detect-stale:
+    runs-on: ubuntu-latest
+    outputs:
+      versions: ${{ steps.detect.outputs.versions }}
+      has_stale: ${{ steps.detect.outputs.has_stale }}
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Resolve to_version=auto from nextcloud:production
+        id: resolve
+        shell: bash
+        env:
+          TO_VERSION: ${{ inputs.to_version || 'auto' }}
+        run: |
+          set -euo pipefail
+
+          to_version="${TO_VERSION}"
+          if [ "${to_version}" = "auto" ]; then
+            docker pull nextcloud:production >/dev/null
+            to_version="$(docker image inspect --format='{{range .Config.Env}}{{println .}}{{end}}' nextcloud:production | awk '$0 ~ /^NEXTCLOUD_VERSION=/ && !found { sub(/^NEXTCLOUD_VERSION=/,""); print; found=1 }')"
+          fi
+
+          if [ -z "${to_version}" ]; then
+            echo "Could not resolve to_version" >&2
+            exit 1
+          fi
+
+          echo "to_version=${to_version}" >> "${GITHUB_OUTPUT}"
+          echo "Resolved to_version: ${to_version}"
+
+      - name: Find stale published version tags
+        id: detect
+        shell: bash
+        env:
+          FROM_VERSION: ${{ inputs.from_version || '32.0.7' }}
+          TO_VERSION: ${{ steps.resolve.outputs.to_version }}
+          MAJOR_FILTER: ${{ inputs.major_filter || '' }}
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+          import urllib.request
+
+          namespace = os.environ["DOCKERHUB_NAMESPACE"].strip()
+          repository = os.environ["DOCKERHUB_REPOSITORY"].strip()
+          from_version = os.environ["FROM_VERSION"].strip()
+          to_version = os.environ["TO_VERSION"].strip()
+          major_filter_raw = os.environ["MAJOR_FILTER"].strip()
+
+          semver_re = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
+
+          def parse(v):
+              m = semver_re.fullmatch(v)
+              if not m:
+                  raise SystemExit(f"Invalid version: {v}")
+              return tuple(map(int, m.groups()))
+
+          def fetch_tags(ns, repo):
+              tags = []
+              url = f"https://hub.docker.com/v2/repositories/{ns}/{repo}/tags?page_size=100"
+              while url:
+                  with urllib.request.urlopen(url, timeout=30) as r:
+                      payload = json.load(r)
+                  for item in payload.get("results", []):
+                      tags.append(str(item.get("name", "")).strip())
+                  url = payload.get("next")
+              return tags
+
+          def imagetools_field(image_ref, go_format):
+              try:
+                  out = subprocess.run(
+                      ["docker", "buildx", "imagetools", "inspect", image_ref, "--format", go_format],
+                      capture_output=True, text=True, timeout=30, check=True,
+                  )
+                  return out.stdout.strip()
+              except subprocess.CalledProcessError:
+                  return None
+
+          start = parse(from_version)
+          end = parse(to_version)
+          major_filter = int(major_filter_raw) if major_filter_raw else None
+
+          candidates = []
+          for name in fetch_tags(namespace, repository):
+              m = semver_re.fullmatch(name)
+              if not m:
+                  continue
+              v = tuple(map(int, m.groups()))
+              if not (start <= v <= end):
+                  continue
+              if major_filter is not None and v[0] != major_filter:
+                  continue
+              candidates.append((v, name))
+
+          candidates.sort()
+          names = [n for _, n in candidates]
+          print(f"Candidate published versions in range [{from_version}, {to_version}]: {names}")
+
+          stale = []
+          unchanged = []
+          not_found = []
+
+          for version in names:
+              base_image = f"nextcloud:{version}"
+              image_tag = f"{namespace}/{repository}:{version}"
+
+              upstream_digest = imagetools_field(base_image, "{{.Manifest.Digest}}")
+              if not upstream_digest:
+                  print(f"{version}: upstream {base_image} not found, skipping")
+                  not_found.append(version)
+                  continue
+
+              previous_digest = imagetools_field(
+                  image_tag, '{{index .Image.Config.Labels "org.opencontainers.image.base.digest"}}'
+              )
+
+              if not previous_digest or previous_digest != upstream_digest:
+                  print(f"{version}: STALE (have={previous_digest!r} want={upstream_digest!r})")
+                  stale.append(version)
+              else:
+                  print(f"{version}: up to date ({upstream_digest})")
+                  unchanged.append(version)
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
+              f.write("versions=" + json.dumps(stale) + "\n")
+              f.write("has_stale=" + ("true" if stale else "false") + "\n")
+
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
+              f.write("## Stale Version Tag Check\n\n")
+              f.write(f"- Range checked: {from_version} to {to_version}\n")
+              f.write(f"- Candidates considered: {len(names)}\n")
+              f.write(f"- Stale (will rebuild): {', '.join(stale) if stale else 'none'}\n")
+              f.write(f"- Up to date: {', '.join(unchanged) if unchanged else 'none'}\n")
+              f.write(f"- Not found upstream: {', '.join(not_found) if not_found else 'none'}\n")
+          PY
+
+  rebuild-stale:
+    needs: detect-stale
+    if: needs.detect-stale.outputs.has_stale == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        version: ${{ fromJson(needs.detect-stale.outputs.versions) }}
+    env:
+      IMAGE_NAME: ${{ env.DOCKERHUB_NAMESPACE }}/${{ env.DOCKERHUB_REPOSITORY }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Rebuild ${{ matrix.version }} against refreshed upstream base
+        id: rebuild
+        shell: bash
+        env:
+          VERSION: ${{ matrix.version }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+        run: |
+          set -euo pipefail
+
+          base_image="nextcloud:${VERSION}"
+          image_tag="${IMAGE_NAME}:${VERSION}"
+
+          base_digest="$(docker buildx imagetools inspect "${base_image}" --format '{{.Manifest.Digest}}')"
+
+          generated_dockerfile="/tmp/Dockerfile.${VERSION}"
+          awk -v replacement="FROM ${base_image}" '
+            BEGIN { replaced = 0 }
+            {
+              if (!replaced && $1 == "FROM") {
+                print replacement
+                replaced = 1
+                next
+              }
+              print
+            }
+            END {
+              if (!replaced) exit 1
+            }
+          ' Dockerfile > "${generated_dockerfile}"
+
+          if [ "${DRY_RUN}" = "true" ]; then
+            echo "Dry run: would rebuild ${image_tag} from ${base_image}@${base_digest}"
+            echo "rebuilt=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          echo "Rebuilding ${image_tag} from ${base_image}@${base_digest}"
+
+          docker buildx build \
+            --pull \
+            --push \
+            --file "${generated_dockerfile}" \
+            --tag "${image_tag}" \
+            --label "org.opencontainers.image.base.name=${base_image}" \
+            --label "org.opencontainers.image.base.digest=${base_digest}" \
+            .
+
+          echo "rebuilt=true" >> "${GITHUB_OUTPUT}"
+          echo "base_digest=${base_digest}" >> "${GITHUB_OUTPUT}"
+
+      - name: Notify Discord of rebuild
+        if: steps.rebuild.outputs.rebuilt == 'true' && success()
+        shell: bash
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          VERSION: ${{ matrix.version }}
+          BASE_DIGEST: ${{ steps.rebuild.outputs.base_digest }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${DISCORD_WEBHOOK_URL:-}" ]; then
+            echo "DISCORD_WEBHOOK_URL secret not set, skipping notification."
+            exit 0
+          fi
+
+          payload="$(jq -n \
+            --arg content "✅ **${IMAGE_NAME}:${VERSION}** rebuilt — upstream \`nextcloud:${VERSION}\` changed (new digest \`${BASE_DIGEST}\`). Run: ${RUN_URL}" \
+            '{content: $content}')"
+
+          curl -sf -H "Content-Type: application/json" -X POST -d "${payload}" "${DISCORD_WEBHOOK_URL}"
+
+      - name: Notify Discord of failure
+        if: failure()
+        shell: bash
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          VERSION: ${{ matrix.version }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${DISCORD_WEBHOOK_URL:-}" ]; then
+            echo "DISCORD_WEBHOOK_URL secret not set, skipping notification."
+            exit 0
+          fi
+
+          payload="$(jq -n \
+            --arg content "❌ **${IMAGE_NAME}:${VERSION}** rebuild failed. Run: ${RUN_URL}" \
+            '{content: $content}')"
+
+          curl -sf -H "Content-Type: application/json" -X POST -d "${payload}" "${DISCORD_WEBHOOK_URL}"
