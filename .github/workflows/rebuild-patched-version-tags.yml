@@ -200,8 +200,10 @@ jobs:
                   )
 
               manifest = data.get("manifest", {}) or {}
-              if "image.manifest" in manifest.get("mediaType", ""):
-                  # Tag resolves directly to a single-platform manifest; the
+              media_type = manifest.get("mediaType", "")
+              if "image.manifest" in media_type or media_type.endswith("distribution.manifest.v2+json"):
+                  # Tag resolves directly to a single-platform OCI or Docker
+                  # schema-2 manifest; the
                   # top-level "image" field already has the flat config.
                   return labels_from_image(data.get("image"))
 
@@ -339,7 +341,8 @@ jobs:
           base_digest="$(docker buildx imagetools inspect "${base_image}" --format '{{.Manifest.Digest}}')"
 
           generated_dockerfile="/tmp/Dockerfile.${VERSION}"
-          awk -v replacement="FROM ${base_image}" '
+          # Pin to the inspected digest so the built base matches the recorded label.
+          awk -v replacement="FROM ${base_image}@${base_digest}" '
             BEGIN { replaced = 0 }
             {
               if (!replaced && $1 == "FROM") {
