@@ -323,7 +323,7 @@ jobs:
 
               if not previous_digest or previous_digest != upstream_digest:
                   print(f"{version}: STALE (have={previous_digest!r} want={upstream_digest!r})")
-                  stale.append(version)
+                  stale.append({"version": version, "digest": upstream_digest})
               else:
                   print(f"{version}: up to date ({upstream_digest})")
                   unchanged.append(version)
@@ -338,7 +338,7 @@ jobs:
               if production_version:
                   f.write(f"- Skipped (owned by dockerhub-auto-build.yml): {production_version}\n")
               f.write(f"- Candidates considered: {len(names)}\n")
-              f.write(f"- Stale (will rebuild): {', '.join(stale) if stale else 'none'}\n")
+              f.write(f"- Stale (will rebuild): {', '.join(item['version'] for item in stale) if stale else 'none'}\n")
               f.write(f"- Up to date: {', '.join(unchanged) if unchanged else 'none'}\n")
               f.write(f"- Not found upstream: {', '.join(not_found) if not_found else 'none'}\n")
           PY
@@ -366,12 +366,13 @@ jobs:
   rebuild-stale:
     needs: detect-stale
     if: needs.detect-stale.outputs.has_stale == 'true'
+    name: rebuild-stale (${{ matrix.version }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       max-parallel: 3
       matrix:
-        version: ${{ fromJson(needs.detect-stale.outputs.versions) }}
+        include: ${{ fromJson(needs.detect-stale.outputs.versions) }}
     env:
       IMAGE_NAME: ${{ inputs.dockerhub_namespace || 'bankaitech' }}/${{ inputs.dockerhub_repository || 'nextcloud' }}
     steps:
@@ -392,6 +393,7 @@ jobs:
         shell: bash
         env:
           VERSION: ${{ matrix.version }}
+          BASE_DIGEST: ${{ matrix.digest }}
           DRY_RUN: ${{ inputs.dry_run || 'false' }}
         run: |
           set -euo pipefail
@@ -399,7 +401,10 @@ jobs:
           base_image="nextcloud:${VERSION}"
           image_tag="${IMAGE_NAME}:${VERSION}"
 
-          base_digest="$(docker buildx imagetools inspect "${base_image}" --format '{{.Manifest.Digest}}')"
+          # Digest recorded by detect-stale. Re-inspecting with --format makes
+          # buildx fetch every platform's manifests and configs, which burns
+          # Docker Hub pull quota and was rate limited in practice.
+          base_digest="${BASE_DIGEST}"
 
           generated_dockerfile="/tmp/Dockerfile.${VERSION}"
           # Pin to the inspected digest so the built base matches the recorded label.
@@ -438,7 +443,7 @@ jobs:
           # Fail loudly if upstream republished the tag while we were building;
           # the stored label then no longer matches, so the next nightly run
           # detects the tag as stale and rebuilds it against the newer base.
-          current_digest="$(docker buildx imagetools inspect "${base_image}" --format '{{.Manifest.Digest}}')"
+          current_digest="$(docker buildx imagetools inspect "${base_image}" | awk '/^Digest:/ && !found { print $2; found=1 }')"
           if [ "${current_digest}" != "${base_digest}" ]; then
             echo "Upstream ${base_image} changed during the build (${base_digest} -> ${current_digest}); the next nightly run will rebuild it." >&2
             exit 1
