@@ -140,8 +140,10 @@ jobs:
                   url = payload.get("next")
               return tags
 
-          def run_imagetools(image_ref, go_format, max_attempts=3):
+          def run_imagetools(image_ref, go_format=None, max_attempts=3):
               """Run `docker buildx imagetools inspect` for image_ref.
+
+              With go_format=None the plain (unformatted) output is returned.
 
               Returns (stdout, not_found). not_found is True only when the
               registry confirms the manifest genuinely does not exist. Any
@@ -153,9 +155,11 @@ jobs:
               last_err = None
               for attempt in range(1, max_attempts + 1):
                   try:
+                      cmd = ["docker", "buildx", "imagetools", "inspect", image_ref]
+                      if go_format:
+                          cmd += ["--format", go_format]
                       out = subprocess.run(
-                          ["docker", "buildx", "imagetools", "inspect", image_ref, "--format", go_format],
-                          capture_output=True, text=True, timeout=30, check=True,
+                          cmd, capture_output=True, text=True, timeout=30, check=True,
                       )
                       return out.stdout.strip(), False
                   except subprocess.CalledProcessError as exc:
@@ -173,6 +177,22 @@ jobs:
                       if attempt < max_attempts:
                           time.sleep(5 * attempt)
               raise RuntimeError(f"Failed to inspect {image_ref} after {max_attempts} attempts: {last_err}")
+
+          def get_top_level_digest(image_ref):
+              """Return (digest, not_found) for image_ref.
+
+              Uses unformatted inspection and parses the top-level `Digest:`
+              header: a --format call makes buildx load every platform's child
+              manifests and configs first, which multiplies registry requests
+              and burns through Docker Hub's rate limit across many versions.
+              """
+              stdout, not_found = run_imagetools(image_ref)
+              if not_found:
+                  return None, True
+              match = re.search(r"^Digest:\s+(sha256:[0-9a-f]{64})\s*$", stdout or "", re.MULTILINE)
+              if not match:
+                  raise RuntimeError(f"Could not parse digest from inspection of {image_ref}")
+              return match.group(1), False
 
           def get_own_base_digest_label(image_tag):
               """Best-effort lookup of our previously stored
@@ -274,7 +294,7 @@ jobs:
               # Any failure other than a confirmed "not found" propagates as a
               # RuntimeError here and fails the whole step, rather than being
               # swallowed and silently reported as nothing-to-rebuild.
-              upstream_digest, upstream_not_found = run_imagetools(base_image, "{{.Manifest.Digest}}")
+              upstream_digest, upstream_not_found = get_top_level_digest(base_image)
               if upstream_not_found:
                   print(f"{version}: upstream {base_image} not found, skipping")
                   not_found.append(version)
@@ -301,6 +321,26 @@ jobs:
               f.write(f"- Up to date: {', '.join(unchanged) if unchanged else 'none'}\n")
               f.write(f"- Not found upstream: {', '.join(not_found) if not_found else 'none'}\n")
           PY
+
+      - name: Notify Discord of detection failure
+        if: failure()
+        shell: bash
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${DISCORD_WEBHOOK_URL:-}" ]; then
+            echo "DISCORD_WEBHOOK_URL secret not set, skipping notification."
+            exit 0
+          fi
+
+          payload="$(jq -n \
+            --arg content "❌ **${DOCKERHUB_NAMESPACE}/${DOCKERHUB_REPOSITORY}** stale-tag detection failed, so no version tags were checked or rebuilt. Run: ${RUN_URL}" \
+            '{content: $content}')"
+
+          curl -sf -H "Content-Type: application/json" -X POST -d "${payload}" "${DISCORD_WEBHOOK_URL}"
 
   rebuild-stale:
     needs: detect-stale
