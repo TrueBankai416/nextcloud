@@ -88,6 +88,8 @@ jobs:
             BASE_IMAGE=${{ inputs.base_digest != '' && format('{0}@{1}', inputs.base_image, inputs.base_digest) || inputs.base_image }}
           labels: |
             ${{ inputs.labels }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.base.name=${{ inputs.base_image }}
             org.opencontainers.image.base.digest=${{ inputs.base_digest }}
           outputs: type=image,name=${{ inputs.image_name }},push-by-digest=true,name-canonical=true,push=true
