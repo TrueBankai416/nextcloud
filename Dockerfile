@@ -1,5 +1,6 @@
-# Use the Nextcloud production image as the base
-FROM nextcloud:production
+# Use the Nextcloud production image as the base (overridable by CI to pin a digest)
+ARG BASE_IMAGE=nextcloud:production
+FROM ${BASE_IMAGE}
 
 # Install gosu (Debian/Ubuntu)
 RUN apt-get update && apt-get install -y gosu && rm -rf /var/lib/apt/lists/*
@@ -104,9 +105,14 @@ RUN set -ex; \
     apt-get purge -y --auto-remove -o APT::AutoRemove::RecommendsImportant=false; \
     rm -rf /var/lib/apt/lists/*
 
-# Install notify_push binary
-RUN NOTIFY_PUSH_VERSION=$(curl -s https://api.github.com/repos/nextcloud/notify_push/releases/latest | grep -oP '"tag_name": "\K(.*)(?=")') \
- && wget -O /usr/local/bin/notify_push "https://github.com/nextcloud/notify_push/releases/download/${NOTIFY_PUSH_VERSION}/notify_push-x86_64-unknown-linux-musl" \
+# Install notify_push binary (matching the build architecture)
+RUN case "$(dpkg --print-architecture)" in \
+      amd64) NOTIFY_PUSH_ARCH=x86_64 ;; \
+      arm64) NOTIFY_PUSH_ARCH=aarch64 ;; \
+      *) echo "Unsupported architecture: $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac \
+ && NOTIFY_PUSH_VERSION=$(curl -s https://api.github.com/repos/nextcloud/notify_push/releases/latest | grep -oP '"tag_name": "\K(.*)(?=")') \
+ && wget -O /usr/local/bin/notify_push "https://github.com/nextcloud/notify_push/releases/download/${NOTIFY_PUSH_VERSION}/notify_push-${NOTIFY_PUSH_ARCH}-unknown-linux-musl" \
  && chmod +x /usr/local/bin/notify_push
 
 # Copy supervisord configuration

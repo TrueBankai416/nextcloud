@@ -1,0 +1,210 @@
+name: Build Multi-Arch Image
+
+# Reusable workflow. Builds the image natively on one runner per architecture
+# (avoids slow QEMU emulation of the dlib compile), pushes each architecture
+# by digest, then merges the digests into a single multi-arch manifest list
+# under every requested tag.
+
+on:
+  workflow_call:
+    inputs:
+      image_name:
+        description: Docker Hub repository, for example bankaitech/nextcloud
+        type: string
+        required: true
+      tags:
+        description: Newline-separated list of full image references to publish
+        type: string
+        required: true
+      labels:
+        description: Newline-separated OCI labels to add to every architecture image
+        type: string
+        default: ""
+      base_image:
+        description: Upstream base image reference
+        type: string
+        default: nextcloud:production
+      base_digest:
+        description: Upstream base image digest; when set, the build is pinned to it
+        type: string
+        default: ""
+      verify_base_unchanged:
+        description: Fail if base_image no longer resolves to base_digest after the build
+        type: boolean
+        default: false
+      artifact_key:
+        description: Unique key so artifacts of concurrent calls in one run do not collide
+        type: string
+        default: default
+      success_message:
+        description: Discord message sent after a successful publish (empty to disable)
+        type: string
+        default: ""
+      failure_message:
+        description: Discord message sent after a failed build or merge (empty to disable)
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+            suffix: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            suffix: arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ matrix.platform }}
+          pull: true
+          provenance: false
+          build-args: |
+            BASE_IMAGE=${{ inputs.base_digest != '' && format('{0}@{1}', inputs.base_image, inputs.base_digest) || inputs.base_image }}
+          labels: |
+            ${{ inputs.labels }}
+            org.opencontainers.image.base.name=${{ inputs.base_image }}
+            org.opencontainers.image.base.digest=${{ inputs.base_digest }}
+          outputs: type=image,name=${{ inputs.image_name }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export digest
+        shell: bash
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/digests"
+          touch "${RUNNER_TEMP}/digests/${DIGEST#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ inputs.artifact_key }}-${{ matrix.suffix }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-${{ inputs.artifact_key }}-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Create and push multi-arch manifest
+        shell: bash
+        working-directory: ${{ runner.temp }}/digests
+        env:
+          IMAGE_NAME: ${{ inputs.image_name }}
+          TAGS: ${{ inputs.tags }}
+        run: |
+          set -euo pipefail
+
+          tag_args=()
+          while IFS= read -r tag; do
+            [ -n "${tag}" ] && tag_args+=(-t "${tag}")
+          done <<< "${TAGS}"
+
+          if [ "$(ls | wc -l)" -ne 2 ]; then
+            echo "Expected exactly 2 architecture digests, found: $(ls)" >&2
+            exit 1
+          fi
+
+          docker buildx imagetools create "${tag_args[@]}" \
+            $(printf "${IMAGE_NAME}@sha256:%s " *)
+
+          docker buildx imagetools inspect "${tag_args[1]}"
+
+      # Fail loudly if upstream republished the tag while we were building;
+      # the stored label then no longer matches, so the next scheduled run
+      # detects the tag as stale and rebuilds it against the newer base.
+      - name: Verify base image did not change during the build
+        if: inputs.verify_base_unchanged && inputs.base_digest != ''
+        shell: bash
+        env:
+          BASE_IMAGE: ${{ inputs.base_image }}
+          BASE_DIGEST: ${{ inputs.base_digest }}
+        run: |
+          set -euo pipefail
+          current_digest="$(docker buildx imagetools inspect "${BASE_IMAGE}" | awk '/^Digest:/ && !found { print $2; found=1 }')"
+          if [ "${current_digest}" != "${BASE_DIGEST}" ]; then
+            echo "Upstream ${BASE_IMAGE} changed during the build (${BASE_DIGEST} -> ${current_digest}); the next scheduled run will rebuild it." >&2
+            exit 1
+          fi
+
+  notify:
+    runs-on: ubuntu-latest
+    needs: [build, merge]
+    if: always() && (inputs.success_message != '' || inputs.failure_message != '')
+    steps:
+      - name: Notify Discord
+        shell: bash
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          MERGE_RESULT: ${{ needs.merge.result }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          SUCCESS_MESSAGE: ${{ inputs.success_message }}
+          FAILURE_MESSAGE: ${{ inputs.failure_message }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${DISCORD_WEBHOOK_URL:-}" ]; then
+            echo "DISCORD_WEBHOOK_URL secret not set, skipping notification."
+            exit 0
+          fi
+
+          if [ "${MERGE_RESULT}" = "success" ]; then
+            message="${SUCCESS_MESSAGE}"
+          elif [ "${BUILD_RESULT}" = "failure" ] || [ "${MERGE_RESULT}" = "failure" ]; then
+            message="${FAILURE_MESSAGE}"
+          else
+            echo "Run cancelled or skipped, no notification."
+            exit 0
+          fi
+
+          if [ -z "${message}" ]; then
+            exit 0
+          fi
+
+          payload="$(jq -n --arg content "${message} Run: ${RUN_URL}" '{content: $content}')"
+
+          curl -sf -H "Content-Type: application/json" -X POST -d "${payload}" "${DISCORD_WEBHOOK_URL}"
