@@ -49,6 +49,8 @@ env:
 jobs:
   check-missing-tags:
     runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.build_matrix.outputs.matrix }}
 
     steps:
       - name: Resolve target Nextcloud version from upstream image
@@ -189,14 +191,6 @@ jobs:
           print(f"Missing strict numeric tags: {len(missing_versions)}")
           PY
 
-      - name: Set up Docker Buildx
-        if: inputs.build_and_push_missing == 'true' && steps.compare.outputs.missing_count != '0'
-        uses: docker/setup-buildx-action@v3
-
-      - name: Checkout repository for Dockerfile build context
-        if: inputs.build_and_push_missing == 'true' && steps.compare.outputs.missing_count != '0'
-        uses: actions/checkout@v4
-
       - name: Log in to Docker Hub
         if: inputs.build_and_push_missing == 'true' && steps.compare.outputs.missing_count != '0'
         uses: docker/login-action@v3
@@ -204,76 +198,37 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build and push missing versions
-        id: build_missing
+      - name: Resolve upstream digests for missing versions
+        id: build_matrix
         if: inputs.build_and_push_missing == 'true' && steps.compare.outputs.missing_count != '0'
         shell: bash
         env:
-          DOCKERHUB_NAMESPACE: ${{ inputs.dockerhub_namespace }}
-          DOCKERHUB_REPOSITORY: ${{ inputs.dockerhub_repository }}
           MISSING_VERSIONS: ${{ steps.compare.outputs.missing_versions }}
         run: |
           set -euo pipefail
 
-          mapfile -t missing_versions < <(printf '%s\n' "${MISSING_VERSIONS}" | sed '/^$/d')
+          matrix='[]'
+          while IFS= read -r version; do
+            [ -n "${version}" ] || continue
 
-          built_versions=()
-          failed_versions=()
-
-          for version in "${missing_versions[@]}"; do
-            image_tag="${DOCKERHUB_NAMESPACE}/${DOCKERHUB_REPOSITORY}:${version}"
-            base_image="nextcloud:${version}"
-            generated_dockerfile="/tmp/Dockerfile.${version}"
-
-            echo "Preparing build for ${image_tag} using base ${base_image}"
-
-            if ! docker pull "${base_image}"; then
-              echo "Skipping ${version}: upstream base image ${base_image} was not found"
-              failed_versions+=("${version}")
+            # Unformatted inspection only reads the top-level index digest and
+            # avoids the extra registry requests a --format call would make.
+            if ! output="$(docker buildx imagetools inspect "nextcloud:${version}" 2>&1)"; then
+              echo "Skipping ${version}: upstream base image nextcloud:${version} could not be inspected" >&2
               continue
             fi
 
-            awk -v replacement="FROM ${base_image}" '
-              BEGIN { replaced = 0 }
-              {
-                if (!replaced && $1 == "FROM") {
-                  print replacement
-                  replaced = 1
-                  next
-                }
-                print
-              }
-              END {
-                if (!replaced) {
-                  exit 1
-                }
-              }
-            ' Dockerfile > "${generated_dockerfile}"
-
-            if docker buildx build \
-              --pull \
-              --push \
-              --file "${generated_dockerfile}" \
-              --tag "${image_tag}" \
-              .; then
-              echo "Built and pushed ${image_tag}"
-              built_versions+=("${version}")
-            else
-              echo "Build failed for ${image_tag}"
-              failed_versions+=("${version}")
+            digest="$(printf '%s\n' "${output}" | awk '/^Digest:/ && !found { print $2; found=1 }')"
+            if [ -z "${digest}" ]; then
+              echo "Skipping ${version}: could not read upstream digest" >&2
+              continue
             fi
-          done
 
-          {
-            echo "built_count=${#built_versions[@]}"
-            echo "failed_count=${#failed_versions[@]}"
-            echo "built_versions<<EOF"
-            printf '%s\n' "${built_versions[@]}"
-            echo "EOF"
-            echo "failed_versions<<EOF"
-            printf '%s\n' "${failed_versions[@]}"
-            echo "EOF"
-          } >> "${GITHUB_OUTPUT}"
+            matrix="$(jq -c --arg version "${version}" --arg digest "${digest}" '. + [{version: $version, digest: $digest}]' <<< "${matrix}")"
+          done <<< "${MISSING_VERSIONS}"
+
+          echo "matrix=${matrix}" >> "${GITHUB_OUTPUT}"
+          echo "Versions to build: ${matrix}"
 
       - name: Publish summary
         shell: bash
@@ -294,8 +249,7 @@ jobs:
             echo "- Missing strict numeric tags: ${{ steps.compare.outputs.missing_count }}"
             echo "- Build missing versions: ${{ inputs.build_and_push_missing }}"
             if [ "${{ inputs.build_and_push_missing }}" = "true" ] && [ "${{ steps.compare.outputs.missing_count }}" != "0" ]; then
-              echo "- Built missing versions: ${{ steps.build_missing.outputs.built_count }}"
-              echo "- Failed builds: ${{ steps.build_missing.outputs.failed_count }}"
+              echo "- Multi-arch builds are run by the build-missing job; see its matrix entries for per-version results."
             fi
             echo ""
             echo "### Missing Versions"
@@ -303,22 +257,6 @@ jobs:
               echo "None"
             else
               echo "${{ steps.compare.outputs.missing_versions }}"
-            fi
-            if [ "${{ inputs.build_and_push_missing }}" = "true" ] && [ "${{ steps.compare.outputs.missing_count }}" != "0" ]; then
-              echo ""
-              echo "### Built Versions"
-              if [ "${{ steps.build_missing.outputs.built_count }}" = "0" ]; then
-                echo "None"
-              else
-                echo "${{ steps.build_missing.outputs.built_versions }}"
-              fi
-              echo ""
-              echo "### Failed Version Builds"
-              if [ "${{ steps.build_missing.outputs.failed_count }}" = "0" ]; then
-                echo "None"
-              else
-                echo "${{ steps.build_missing.outputs.failed_versions }}"
-              fi
             fi
             echo ""
             echo "### Present Versions"
@@ -336,9 +274,22 @@ jobs:
           echo "${{ steps.compare.outputs.missing_versions }}" >&2
           exit 1
 
-      - name: Fail if any missing version build failed
-        if: inputs.build_and_push_missing == 'true' && steps.compare.outputs.missing_count != '0' && steps.build_missing.outputs.failed_count != '0'
-        run: |
-          echo "Some missing versions failed to build/push:" >&2
-          echo "${{ steps.build_missing.outputs.failed_versions }}" >&2
           exit 1
+
+  build-missing:
+    needs: check-missing-tags
+    if: inputs.build_and_push_missing == 'true' && needs.check-missing-tags.outputs.matrix != '' && needs.check-missing-tags.outputs.matrix != '[]'
+    name: build-missing (${{ matrix.version }})
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        include: ${{ fromJson(needs.check-missing-tags.outputs.matrix) }}
+    uses: ./.github/workflows/build-multiarch.yml
+    with:
+      image_name: ${{ inputs.dockerhub_namespace }}/${{ inputs.dockerhub_repository }}
+      tags: ${{ inputs.dockerhub_namespace }}/${{ inputs.dockerhub_repository }}:${{ matrix.version }}
+      base_image: nextcloud:${{ matrix.version }}
+      base_digest: ${{ matrix.digest }}
+      artifact_key: missing-${{ matrix.version }}
+    secrets: inherit
