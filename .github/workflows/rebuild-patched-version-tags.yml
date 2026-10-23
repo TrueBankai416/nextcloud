@@ -6,7 +6,11 @@ name: Rebuild Patched Nextcloud Version Tags
 # when upstream re-publishes that exact nextcloud:<version> tag with a security
 # fix (such as a PHP CVE patch). This workflow checks every already-published
 # bankaitech/nextcloud version tag against its matching upstream nextcloud:<version>
-# tag and rebuilds any that have fallen behind.
+# tag and rebuilds any that have fallen behind. It also publishes any upstream
+# patch version in range that bankaitech/nextcloud has never published at all
+# (e.g. upstream releases 33.0.8 after we last published 33.0.7) — otherwise
+# those would never be noticed, since the digest-drift check above only ever
+# re-examines tags we already have.
 
 on:
   schedule:
@@ -157,11 +161,36 @@ jobs:
               return tuple(map(int, m.groups()))
 
           def fetch_tags(ns, repo):
+              """Fetch every tag name for ns/repo, paginating as needed.
+
+              library/nextcloud alone has thousands of tags, so this makes
+              many requests per run. A browser-like User-Agent, a short delay
+              between pages, and retries with backoff avoid Docker Hub's
+              anti-bot throttling, which otherwise intermittently 403s rapid
+              paginated requests.
+              """
               tags = []
               url = f"https://hub.docker.com/v2/repositories/{ns}/{repo}/tags?page_size=100"
+              headers = {"User-Agent": "Mozilla/5.0"}
+              first_page = True
               while url:
-                  with urllib.request.urlopen(url, timeout=30) as r:
-                      payload = json.load(r)
+                  if not first_page:
+                      time.sleep(1)
+                  first_page = False
+                  payload = None
+                  last_err = None
+                  for attempt in range(1, 6):
+                      try:
+                          req = urllib.request.Request(url, headers=headers)
+                          with urllib.request.urlopen(req, timeout=30) as r:
+                              payload = json.load(r)
+                          break
+                      except Exception as exc:
+                          last_err = exc
+                          if attempt < 5:
+                              time.sleep(5 * attempt)
+                  if payload is None:
+                      raise RuntimeError(f"Failed to fetch tags from {url}: {last_err}")
                   for item in payload.get("results", []):
                       tags.append(str(item.get("name", "")).strip())
                   url = payload.get("next")
@@ -299,16 +328,23 @@ jobs:
           end = parse(to_version)
           major_filter = int(major_filter_raw) if major_filter_raw else None
 
-          candidates = []
+          # Full set of versions we already publish, regardless of range/major
+          # filter, so "missing" detection below is not fooled by a narrowed
+          # from_version/to_version/major_filter excluding a version we do
+          # have under a different scope.
+          mirror_versions = set()
           for name in fetch_tags(namespace, repository):
               m = semver_re.fullmatch(name)
-              if not m:
-                  continue
-              v = tuple(map(int, m.groups()))
+              if m:
+                  mirror_versions.add(tuple(map(int, m.groups())))
+
+          candidates = []
+          for v in mirror_versions:
               if not (start <= v <= end):
                   continue
               if major_filter is not None and v[0] != major_filter:
                   continue
+              name = ".".join(map(str, v))
               if production_version and name == production_version:
                   continue
               candidates.append((v, name))
@@ -317,7 +353,51 @@ jobs:
           names = [n for _, n in candidates]
           print(f"Candidate published versions in range [{from_version}, {to_version}]: {names}")
 
+          # Versions upstream has published in range that we have never
+          # published at all. rebuild-patched-version-tags.yml otherwise only
+          # ever re-checks tags we already have, so a brand new upstream patch
+          # release (e.g. 33.0.8 landing after we last published 33.0.7) would
+          # never be noticed or built without this. Listing every upstream
+          # library/nextcloud tag isn't viable: Docker Hub's anonymous tags
+          # API 403s past page 10 (~1000 tags), and nextcloud has thousands.
+          # Instead, for each major.minor branch we already mirror, probe the
+          # registry (not the Hub listing API) for the next unpublished patch
+          # numbers, stopping at the first one upstream doesn't have.
+          highest_patch_by_branch = {}
+          for v in mirror_versions:
+              branch = (v[0], v[1])
+              if branch not in highest_patch_by_branch or v[2] > highest_patch_by_branch[branch]:
+                  highest_patch_by_branch[branch] = v[2]
+
+          missing = []
+          missing_digests = {}
+          for (major, minor), highest_patch in sorted(highest_patch_by_branch.items()):
+              if major_filter is not None and major != major_filter:
+                  continue
+              # Only probe branches whose newest tag we already publish falls
+              # within [from_version, to_version]: older abandoned branches
+              # (e.g. a long-retired 28.x/29.x tag predating from_version)
+              # are out of scope and not something this workflow should
+              # resume building.
+              if (major, minor, highest_patch) < start:
+                  continue
+              patch = highest_patch + 1
+              while (major, minor, patch) <= end:
+                  name = f"{major}.{minor}.{patch}"
+                  if production_version and name == production_version:
+                      patch += 1
+                      continue
+                  upstream_digest, upstream_not_found = get_top_level_digest(f"nextcloud:{name}")
+                  if upstream_not_found:
+                      break
+                  missing.append(name)
+                  missing_digests[name] = upstream_digest
+                  patch += 1
+          missing.sort(key=parse)
+          print(f"Upstream versions missing from {namespace}/{repository}: {missing}")
+
           stale = []
+          drifted = []
           unchanged = []
           not_found = []
 
@@ -338,13 +418,22 @@ jobs:
 
               if force_rebuild:
                   print(f"{version}: FORCED (have={previous_digest!r} want={upstream_digest!r})")
-                  stale.append({"version": version, "digest": upstream_digest})
+                  stale.append({"version": version, "digest": upstream_digest, "reason": "forced"})
+                  drifted.append(version)
               elif not previous_digest or previous_digest != upstream_digest:
                   print(f"{version}: STALE (have={previous_digest!r} want={upstream_digest!r})")
-                  stale.append({"version": version, "digest": upstream_digest})
+                  stale.append({"version": version, "digest": upstream_digest, "reason": "stale"})
+                  drifted.append(version)
               else:
                   print(f"{version}: up to date ({upstream_digest})")
                   unchanged.append(version)
+
+          built_missing = []
+          for version in missing:
+              upstream_digest = missing_digests[version]
+              print(f"{version}: MISSING, will build (want={upstream_digest!r})")
+              stale.append({"version": version, "digest": upstream_digest, "reason": "missing"})
+              built_missing.append(version)
 
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
               f.write("versions=" + json.dumps(stale) + "\n")
@@ -357,7 +446,8 @@ jobs:
                   f.write(f"- Skipped (owned by dockerhub-auto-build.yml): {production_version}\n")
               f.write(f"- Candidates considered: {len(names)}\n")
               f.write(f"- Force rebuild: {force_rebuild}\n")
-              f.write(f"- Stale (will rebuild): {', '.join(item['version'] for item in stale) if stale else 'none'}\n")
+              f.write(f"- Stale (will rebuild): {', '.join(drifted) if drifted else 'none'}\n")
+              f.write(f"- Missing (will build new tag): {', '.join(built_missing) if built_missing else 'none'}\n")
               f.write(f"- Up to date: {', '.join(unchanged) if unchanged else 'none'}\n")
               f.write(f"- Not found upstream: {', '.join(not_found) if not_found else 'none'}\n")
           PY
@@ -401,6 +491,6 @@ jobs:
       base_digest: ${{ matrix.digest }}
       verify_base_unchanged: true
       artifact_key: rebuild-${{ matrix.version }}
-      success_message: "${{ format('✅ **{0}/{1}:{2}** rebuilt (linux/amd64, linux/arm64) on base digest `{3}`{4}.', inputs.dockerhub_namespace || 'bankaitech', inputs.dockerhub_repository || 'nextcloud', matrix.version, matrix.digest, inputs.force_rebuild == 'true' && ' (forced rebuild)' || ' — upstream changed') }}"
-      failure_message: "${{ format('❌ **{0}/{1}:{2}** rebuild failed.', inputs.dockerhub_namespace || 'bankaitech', inputs.dockerhub_repository || 'nextcloud', matrix.version) }}"
+      success_message: "${{ matrix.reason == 'missing' && format('✅ **{0}/{1}:{2}** published for the first time (linux/amd64, linux/arm64) on base digest `{3}` — upstream released this version and we had no matching tag yet.', inputs.dockerhub_namespace || 'bankaitech', inputs.dockerhub_repository || 'nextcloud', matrix.version, matrix.digest) || format('✅ **{0}/{1}:{2}** rebuilt (linux/amd64, linux/arm64) on base digest `{3}`{4}.', inputs.dockerhub_namespace || 'bankaitech', inputs.dockerhub_repository || 'nextcloud', matrix.version, matrix.digest, matrix.reason == 'forced' && ' (forced rebuild)' || ' — upstream changed') }}"
+      failure_message: "${{ format('❌ **{0}/{1}:{2}** {3} failed.', inputs.dockerhub_namespace || 'bankaitech', inputs.dockerhub_repository || 'nextcloud', matrix.version, matrix.reason == 'missing' && 'initial publish' || 'rebuild') }}"
     secrets: inherit
