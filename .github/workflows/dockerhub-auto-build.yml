@@ -37,8 +37,6 @@ jobs:
       should_build: ${{ steps.gate.outputs.should_build }}
       base_digest: ${{ steps.upstream.outputs.base_digest }}
       version_tag: ${{ steps.upstream.outputs.version_tag }}
-      tags: ${{ steps.meta.outputs.tags }}
-      labels: ${{ steps.meta.outputs.labels }}
 
     steps:
       - name: Log in to Docker Hub
@@ -124,16 +122,6 @@ jobs:
           echo "Base image digest unchanged and tags are multi-arch, skipping build."
           echo "should_build=false" >> "${GITHUB_OUTPUT}"
 
-      - name: Generate image metadata
-        id: meta
-        if: steps.gate.outputs.should_build == 'true'
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.IMAGE_NAME }}
-          tags: |
-            type=raw,value=latest
-            type=raw,value=${{ steps.upstream.outputs.version_tag }}
-
       - name: No changes detected
         if: steps.gate.outputs.should_build != 'true'
         run: echo "No upstream change detected. Image build skipped."
@@ -164,8 +152,10 @@ jobs:
     uses: ./.github/workflows/build-multiarch.yml
     with:
       image_name: bankaitech/nextcloud
-      tags: ${{ needs.check.outputs.tags }}
-      labels: ${{ needs.check.outputs.labels }}
+      # Tags are composed here rather than passed through a job output: the Docker
+      # Hub username is a secret that also appears in the image name, and GitHub
+      # drops job outputs containing secret values.
+      tags: "bankaitech/nextcloud:latest\nbankaitech/nextcloud:${{ needs.check.outputs.version_tag }}"
       base_image: nextcloud:production
       base_digest: ${{ needs.check.outputs.base_digest }}
       artifact_key: auto-build
