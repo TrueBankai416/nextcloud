@@ -25,6 +25,17 @@ This is an enhanced Nextcloud Docker image with additional features for better p
 - **Better logging**: Structured logging for all services
 - **Health checks**: Built-in health monitoring
 
+## Supported Architectures
+
+Published images are multi-arch, so `docker pull bankaitech/nextcloud:<tag>` automatically selects the right variant for your host:
+
+| Architecture | Typical hardware |
+|--------------|------------------|
+| `linux/amd64` | Standard x86-64 servers and PCs |
+| `linux/arm64` | Raspberry Pi 4/5 (64-bit OS), AWS Graviton, Oracle Ampere, Apple Silicon |
+
+> Version tags published before multi-arch support (and any older than the rebuild workflow's range) may still be `amd64` only. See [CI/CD Workflows](#cicd-workflows).
+
 ## Usage
 
 ### Basic Usage
@@ -179,25 +190,30 @@ sudo docker exec -u www-data nextcloud php occ notify_push:self-test
 sudo docker build -t your-registry/nextcloud:latest .
 ```
 
+This builds for your host's architecture (`amd64` or `arm64`). To pin the base image, pass `--build-arg BASE_IMAGE=nextcloud:<version>`. The first build compiles dlib from source and is slow, especially under emulation, so build each architecture on matching hardware when possible.
+
 ## CI/CD Workflows
 
 This repository publishes `bankaitech/nextcloud` to Docker Hub using several GitHub Actions workflows under [.github/workflows](.github/workflows). Together they keep published images in sync with both this repo's own changes and upstream Nextcloud/PHP security patches, without manual rebuilds.
 
+### [Build Multi-Arch Image](.github/workflows/build-multiarch.yml) (reusable)
+- **Purpose:** Shared by the workflows below to publish `linux/amd64` and `linux/arm64`. Each architecture is built natively on its own runner (`ubuntu-latest` and `ubuntu-24.04-arm`) rather than under QEMU emulation, because the dlib compile is far too slow when emulated. Each image is pushed by digest, then merged into a single multi-arch manifest under every requested tag. It has no triggers of its own, so its jobs appear inside the calling workflow's runs.
+
 ### [Push Latest on Main](.github/workflows/push-latest-on-main.yml)
 - **Trigger:** Push to `main` that touches the Dockerfile, entrypoint/cron scripts, or `supervisord.conf`.
-- **Purpose:** Rebuilds and publishes `bankaitech/nextcloud:latest` immediately whenever this repo's own build changes — so fixes to the Dockerfile or scripts go live right away, independent of any upstream Nextcloud release.
+- **Purpose:** Rebuilds and publishes the multi-arch `bankaitech/nextcloud:latest` immediately whenever this repo's own build changes — so fixes to the Dockerfile or scripts go live right away, independent of any upstream Nextcloud release.
 
 ### [Build and Publish Nextcloud Image](.github/workflows/dockerhub-auto-build.yml)
 - **Trigger:** Hourly schedule, manual dispatch, or push to CI-relevant files.
-- **Purpose:** Tracks the upstream `nextcloud:production` base image. Each run pulls it, compares its digest to the digest recorded on the last published `bankaitech/nextcloud:latest` image, and rebuilds (publishing both `:latest` and the matching version tag, e.g. `34.0.5`) if upstream has actually changed — which also happens whenever upstream re-publishes `production` with a security fix, such as a PHP CVE patch. It also forces a rebuild if `:latest` can't be pulled yet or has no recorded base-digest label, so a missing or not-yet-labeled image doesn't get stuck. Skips the build only when an existing, labeled `:latest` image already matches the current upstream digest, to avoid wasted CI time. Posts a Discord notification (via an optional `DISCORD_WEBHOOK_URL` repository secret) when a rebuild happens or the workflow fails, so patches don't go unnoticed.
+- **Purpose:** Tracks the upstream `nextcloud:production` base image. Each run pulls it, compares its digest to the digest recorded on the last published `bankaitech/nextcloud:latest` image, and rebuilds (publishing both `:latest` and the matching version tag, e.g. `34.0.5`, as multi-arch) if upstream has actually changed — which also happens whenever upstream re-publishes `production` with a security fix, such as a PHP CVE patch. It also forces a rebuild if `:latest` can't be pulled yet, has no recorded base-digest label, or if `:latest` or the version tag is not yet multi-arch, so a missing, not-yet-labeled or amd64-only image doesn't get stuck. Skips the build only when existing multi-arch images already match the current upstream digest, to avoid wasted CI time. Posts a Discord notification (via an optional `DISCORD_WEBHOOK_URL` repository secret) when a rebuild happens or the workflow fails, so patches don't go unnoticed.
 
 ### [Check Missing Nextcloud Version Tags](.github/workflows/check-missing-version-tags.yml)
 - **Trigger:** Manual dispatch only.
-- **Purpose:** Compares the strict numeric Nextcloud versions published upstream (e.g. `32.0.7`, `33.0.4`) against the version tags already published under `bankaitech/nextcloud` within a configurable range, and reports — or optionally builds and pushes — any that are missing. Useful for backfilling version tags you don't have yet; it does not revisit tags that already exist.
+- **Purpose:** Compares the strict numeric Nextcloud versions published upstream (e.g. `32.0.7`, `33.0.4`) against the version tags already published under `bankaitech/nextcloud` within a configurable range, and reports — or optionally builds and pushes — any that are missing. Useful for backfilling version tags you don't have yet; it does not revisit tags that already exist. Missing versions are built as multi-arch images, pinned to the upstream digest so the nightly rebuild leaves them alone until upstream changes.
 
-### Rebuild Patched Nextcloud Version Tags (coming in [#20](https://github.com/TrueBankai416/nextcloud/pull/20))
+### [Rebuild Patched Nextcloud Version Tags](.github/workflows/rebuild-patched-version-tags.yml)
 - **Trigger:** Nightly schedule, or manual dispatch with a `dry_run` preview mode.
-- **Purpose:** Closes the gap the other workflows leave: once a specific version tag (e.g. `bankaitech/nextcloud:32.0.9`) has been published, nothing else revisits it — even if upstream later re-publishes `nextcloud:32.0.9` with a security fix. This workflow checks every existing version tag in a configurable range against its upstream counterpart (using lightweight manifest/config inspection instead of full image pulls, to stay fast and avoid Docker Hub rate limits) and rebuilds, re-labels, and re-pushes any that have fallen behind. Notifies Discord per rebuilt or failed tag. This workflow is introduced in [#20](https://github.com/TrueBankai416/nextcloud/pull/20) and isn't available until that PR merges.
+- **Purpose:** Closes the gap the other workflows leave: once a specific version tag (e.g. `bankaitech/nextcloud:32.0.9`) has been published, nothing else revisits it — even if upstream later re-publishes `nextcloud:32.0.9` with a security fix. This workflow checks every existing version tag in a configurable range (default `32.0.7` up to the current production version) against its upstream counterpart (using lightweight manifest/config inspection instead of full image pulls, to stay fast and avoid Docker Hub rate limits) and rebuilds, re-labels, and re-pushes any that have fallen behind. A tag is also treated as stale if it is not yet multi-arch, so older amd64-only tags are converted automatically. To backfill versions below the default range, run it manually with a lower `from_version`. Notifies Discord per rebuilt or failed tag.
 
 > **Setup note:** The Discord notifications used by **Build and Publish Nextcloud Image** and **Rebuild Patched Nextcloud Version Tags** require a `DISCORD_WEBHOOK_URL` repository secret pointing at a Discord channel webhook (Settings → Secrets and variables → Actions). Builds and rebuilds still run normally without it — notifications are simply skipped.
 
