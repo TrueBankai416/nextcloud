@@ -274,8 +274,6 @@ jobs:
           echo "${{ steps.compare.outputs.missing_versions }}" >&2
           exit 1
 
-          exit 1
-
   build-missing:
     needs: check-missing-tags
     if: inputs.build_and_push_missing == 'true' && needs.check-missing-tags.outputs.matrix != '' && needs.check-missing-tags.outputs.matrix != '[]'
