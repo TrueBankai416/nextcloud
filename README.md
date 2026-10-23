@@ -209,7 +209,7 @@ This repository publishes `bankaitech/nextcloud` to Docker Hub using several Git
 
 ### [Check Missing Nextcloud Version Tags](.github/workflows/check-missing-version-tags.yml)
 - **Trigger:** Manual dispatch only.
-- **Purpose:** Compares the strict numeric Nextcloud versions published upstream (e.g. `32.0.7`, `33.0.4`) against the version tags already published under `bankaitech/nextcloud` within a configurable range, and reports — or optionally builds and pushes — any that are missing. Useful for backfilling version tags you don't have yet; it does not revisit tags that already exist. Tags it builds are currently `amd64` only; the nightly rebuild below converts them to multi-arch on its next run (for versions within its range).
+- **Purpose:** Compares the strict numeric Nextcloud versions published upstream (e.g. `32.0.7`, `33.0.4`) against the version tags already published under `bankaitech/nextcloud` within a configurable range, and reports — or optionally builds and pushes — any that are missing. Useful for backfilling version tags you don't have yet; it does not revisit tags that already exist. Missing versions are built as multi-arch images, pinned to the upstream digest so the nightly rebuild leaves them alone until upstream changes.
 
 ### [Rebuild Patched Nextcloud Version Tags](.github/workflows/rebuild-patched-version-tags.yml)
 - **Trigger:** Nightly schedule, or manual dispatch with a `dry_run` preview mode.
