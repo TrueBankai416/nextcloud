@@ -33,6 +33,14 @@ on:
         description: Optional major to limit checks to (for example 32). Leave empty to include all majors in range
         required: false
         default: ""
+      force_rebuild:
+        description: Rebuild every version tag in range even if the upstream base digest is unchanged (for example after a Dockerfile change)
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
       dry_run:
         description: Report which version tags are stale without rebuilding/pushing them
         required: true
@@ -114,6 +122,7 @@ jobs:
           TO_VERSION: ${{ steps.resolve.outputs.to_version }}
           PRODUCTION_VERSION: ${{ steps.resolve.outputs.production_version }}
           MAJOR_FILTER: ${{ inputs.major_filter || '' }}
+          FORCE_REBUILD: ${{ inputs.force_rebuild || 'false' }}
         run: |
           set -euo pipefail
 
@@ -130,6 +139,7 @@ jobs:
           from_version = os.environ["FROM_VERSION"].strip()
           to_version = os.environ["TO_VERSION"].strip()
           major_filter_raw = os.environ["MAJOR_FILTER"].strip()
+          force_rebuild = os.environ["FORCE_REBUILD"].strip() == "true"
           # dockerhub-auto-build.yml only maintains bankaitech/nextcloud, so
           # other destinations have no hourly publisher and nothing to skip.
           production_version = (
@@ -326,7 +336,10 @@ jobs:
 
               previous_digest = get_own_base_digest_label(image_tag)
 
-              if not previous_digest or previous_digest != upstream_digest:
+              if force_rebuild:
+                  print(f"{version}: FORCED (have={previous_digest!r} want={upstream_digest!r})")
+                  stale.append({"version": version, "digest": upstream_digest})
+              elif not previous_digest or previous_digest != upstream_digest:
                   print(f"{version}: STALE (have={previous_digest!r} want={upstream_digest!r})")
                   stale.append({"version": version, "digest": upstream_digest})
               else:
@@ -343,6 +356,7 @@ jobs:
               if production_version:
                   f.write(f"- Skipped (owned by dockerhub-auto-build.yml): {production_version}\n")
               f.write(f"- Candidates considered: {len(names)}\n")
+              f.write(f"- Force rebuild: {force_rebuild}\n")
               f.write(f"- Stale (will rebuild): {', '.join(item['version'] for item in stale) if stale else 'none'}\n")
               f.write(f"- Up to date: {', '.join(unchanged) if unchanged else 'none'}\n")
               f.write(f"- Not found upstream: {', '.join(not_found) if not_found else 'none'}\n")
@@ -387,6 +401,6 @@ jobs:
       base_digest: ${{ matrix.digest }}
       verify_base_unchanged: true
       artifact_key: rebuild-${{ matrix.version }}
-      success_message: "${{ format('✅ **{0}/{1}:{2}** rebuilt (linux/amd64, linux/arm64) — upstream `nextcloud:{2}` changed (new digest `{3}`).', inputs.dockerhub_namespace || 'bankaitech', inputs.dockerhub_repository || 'nextcloud', matrix.version, matrix.digest) }}"
+      success_message: "${{ format('✅ **{0}/{1}:{2}** rebuilt (linux/amd64, linux/arm64) on base digest `{3}`{4}.', inputs.dockerhub_namespace || 'bankaitech', inputs.dockerhub_repository || 'nextcloud', matrix.version, matrix.digest, inputs.force_rebuild == 'true' && ' (forced rebuild)' || ' — upstream changed') }}"
       failure_message: "${{ format('❌ **{0}/{1}:{2}** rebuild failed.', inputs.dockerhub_namespace || 'bankaitech', inputs.dockerhub_repository || 'nextcloud', matrix.version) }}"
     secrets: inherit
