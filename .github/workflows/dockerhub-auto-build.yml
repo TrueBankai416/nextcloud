@@ -107,10 +107,22 @@ jobs:
           if [ "${previous_base_digest}" != "${{ steps.upstream.outputs.base_digest }}" ]; then
             echo "Base image changed (${previous_base_digest} -> ${{ steps.upstream.outputs.base_digest }}), building."
             echo "should_build=true" >> "${GITHUB_OUTPUT}"
-          else
-            echo "Base image digest unchanged, skipping build."
-            echo "should_build=false" >> "${GITHUB_OUTPUT}"
+            exit 0
           fi
+
+          # Digest is current, but tags published before multi-arch support
+          # only contain amd64 and must be rebuilt once.
+          for tag in latest "${{ steps.upstream.outputs.version_tag }}"; do
+            if ! docker buildx imagetools inspect --raw "${IMAGE_NAME}:${tag}" 2>/dev/null \
+              | jq -e '[.manifests[]? | select(.platform.os == "linux" and .annotations["vnd.docker.reference.type"] != "attestation-manifest") | .platform.architecture] | (index("amd64") != null and index("arm64") != null)' >/dev/null; then
+              echo "${IMAGE_NAME}:${tag} is missing or not multi-arch, building."
+              echo "should_build=true" >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
+          done
+
+          echo "Base image digest unchanged and tags are multi-arch, skipping build."
+          echo "should_build=false" >> "${GITHUB_OUTPUT}"
 
       - name: Generate image metadata
         id: meta
