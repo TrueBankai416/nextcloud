@@ -67,6 +67,10 @@ RUN echo memory_limit=1024M > /usr/local/etc/php/conf.d/zz-memory-limit.ini \
 # Enable proc_open function (required by Memories app and other Nextcloud apps)
 RUN echo 'disable_functions =' > /usr/local/etc/php/conf.d/enable-functions.ini
 
+# Mitigation recommended by The PHP Foundation (CVE-2026-115560, CVE-2026-109619):
+# keep disabled until a fixed PHP release is available, then remove this file
+RUN echo 'session.upload_progress.enabled=0' > /usr/local/etc/php/conf.d/zz-disable-upload-progress.ini
+
 RUN echo 'apc.enable_cli=1' >> "${PHP_INI_DIR}/conf.d/docker-php-ext-apcu.ini"
 
 # Increase opcache memory
