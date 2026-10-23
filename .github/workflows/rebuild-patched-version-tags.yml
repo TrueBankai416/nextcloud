@@ -239,27 +239,32 @@ jobs:
               manifest = data.get("manifest", {}) or {}
               media_type = manifest.get("mediaType", "")
               if "image.manifest" in media_type or media_type.endswith("distribution.manifest.v2+json"):
-                  # Tag resolves directly to a single-platform OCI or Docker
-                  # schema-2 manifest; the
-                  # top-level "image" field already has the flat config.
-                  return labels_from_image(data.get("image"))
+                  # Tag resolves to a single-platform manifest, i.e. a build
+                  # that predates multi-arch publishing. Treat as stale so it
+                  # is rebuilt as a multi-arch image.
+                  return None
 
-              # Tag resolves to an index (buildx attaches a provenance
-              # attestation manifest alongside the real platform manifest even
-              # for single-architecture builds), so .Image is not a flat
-              # config here. Find the linux/amd64 manifest that is not the
-              # attestation, and inspect it directly by digest, which always
-              # returns an unambiguous flat image config.
+              # Tag resolves to an index. Require every published platform to
+              # be present, otherwise treat the tag as stale. Then find the
+              # linux/amd64 manifest that is not an attestation and inspect it
+              # directly by digest, which always returns an unambiguous flat
+              # image config.
+              required_platforms = {"amd64", "arm64"}
+              present_platforms = set()
               child_digest = None
               for child in manifest.get("manifests", []):
                   platform = child.get("platform", {}) or {}
-                  if platform.get("architecture") != "amd64" or platform.get("os") != "linux":
+                  if platform.get("os") != "linux":
                       continue
                   annotations = child.get("annotations", {}) or {}
                   if annotations.get("vnd.docker.reference.type") == "attestation-manifest":
                       continue
-                  child_digest = child.get("digest")
-                  break
+                  present_platforms.add(platform.get("architecture"))
+                  if platform.get("architecture") == "amd64" and not child_digest:
+                      child_digest = child.get("digest")
+
+              if not required_platforms <= present_platforms:
+                  return None
 
               if not child_digest:
                   return None
