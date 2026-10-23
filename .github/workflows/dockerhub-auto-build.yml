@@ -114,7 +114,7 @@ jobs:
           # only contain amd64 and must be rebuilt once.
           for tag in latest "${{ steps.upstream.outputs.version_tag }}"; do
             if ! docker buildx imagetools inspect --raw "${IMAGE_NAME}:${tag}" 2>/dev/null \
-              | jq -e '[.manifests[]?.platform.architecture] | index("arm64") != null' >/dev/null; then
+              | jq -e '[.manifests[]? | select(.platform.os == "linux" and .annotations["vnd.docker.reference.type"] != "attestation-manifest") | .platform.architecture] | (index("amd64") != null and index("arm64") != null)' >/dev/null; then
               echo "${IMAGE_NAME}:${tag} is missing or not multi-arch, building."
               echo "should_build=true" >> "${GITHUB_OUTPUT}"
               exit 0
